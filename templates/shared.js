@@ -321,18 +321,31 @@ function handleFromPlayer(conn, data) {
   }
   if (data.type === 'join') {
     const slot = data.slot;
-    if (!STATE.hands[slot]) return;
+    if (!STATE.hands[slot]) {
+      conn.send({ type:'join-rejected', reason:'No such slot.' });
+      conn.close(); return;
+    }
+    // Reject if slot is already held by a different live connection.
+    const existing = connections[slot];
+    if (existing && existing.open && existing !== conn) {
+      conn.send({ type:'join-rejected', reason:`Slot already taken by ${STATE.hands[slot].name || slot}.` });
+      conn.close(); return;
+    }
     connections[slot] = conn;
     conn._playerId = slot;
     STATE.hands[slot].name = data.name || ('Player ' + slot.slice(6));
     STATE.hands[slot].pfpHash = data.pfpHash || STATE.hands[slot].pfpHash;
     STATE.hands[slot].connected = true;
     logEntry(STATE.hands[slot].name, 'joined', 'sys');
-    // send any missing assets to the new player
-    conn.send({ type:'state', view: viewFor(slot), myId: slot });
-    setTimeout(() => {
-      // The player will ask for what they need based on assetMeta.
-    }, 50);
+    // Auto-add a character token for this player on first join (if they have a pfp).
+    if (STATE.hands[slot].pfpHash) ensureCharacterToken(slot);
+    // send the new player their initial filtered view + ID
+    conn.send({ type:'state', view: viewFor(slot), myId: slot, takenSlots: Object.keys(connections).filter(s => connections[s]?.open) });
+    broadcastTakenSlots();
+    return;
+  }
+  if (data.type === 'request-taken-slots') {
+    conn.send({ type:'taken-slots', slots: Object.keys(connections).filter(s => connections[s]?.open) });
     return;
   }
   if (data.type === 'log') {
@@ -364,6 +377,39 @@ function handleFromGM(data) {
     drawCursor(data.who, data.x, data.y, data.color, data.name, data.pfpHash);
     return;
   }
+  if (data.type === 'join-rejected') {
+    alert('Could not join: ' + (data.reason || 'unknown reason'));
+    location.reload();
+    return;
+  }
+  if (data.type === 'taken-slots') {
+    window._takenSlots = data.slots || [];
+    updateJoinSlotSelect();
+    return;
+  }
+}
+
+function ensureCharacterToken(playerId) {
+  // GM only: make sure each player has exactly one character token on the table.
+  if (ROLE !== 'gm' || !STATE) return;
+  const existing = STATE.table.figurines.find(f => f.kind === 'character' && f.playerId === playerId);
+  if (existing) return; // already present, render() will pick up current pfp
+  const baseX = 400 + (parseInt(playerId.slice(6),10) - 1) * 90;
+  STATE.table.figurines.push({
+    instId: uid(), kind:'character', playerId,
+    x: baseX, y: 500, w: 80, h: 80, rot: 0, z: nextZ(),
+    opacity: 1, locked: false, flipH:false, flipV:false,
+    label: STATE.hands[playerId]?.name || playerId,
+    effects: {},
+  });
+}
+
+function broadcastTakenSlots() {
+  if (ROLE !== 'gm') return;
+  const slots = Object.keys(connections).filter(s => connections[s]?.open);
+  for (const c of Object.values(connections)) {
+    if (c.open) c.send({ type:'taken-slots', slots });
+  }
 }
 
 function onPlayerDisconnect(conn) {
@@ -371,6 +417,7 @@ function onPlayerDisconnect(conn) {
   delete connections[pid];
   if (STATE.hands[pid]) { STATE.hands[pid].connected = false; logEntry(STATE.hands[pid].name || pid, 'disconnected', 'sys'); }
   broadcast({ type:'state' });
+  broadcastTakenSlots();
 }
 
 function broadcast(msg) {
@@ -466,6 +513,18 @@ function applyOp(op, by) {
     case 'set-pfp': {
       const p = s.hands[op.owner]; if (!p) return;
       p.pfpHash = op.hash;
+      ensureCharacterToken(op.owner);
+      break;
+    }
+    case 'toggle-effect': {
+      const f = s.table.figurines.find(f => f.instId === op.instId); if (!f) return;
+      f.effects = f.effects || {};
+      f.effects[op.effect] = !f.effects[op.effect];
+      break;
+    }
+    case 'set-figurine-label': {
+      const f = s.table.figurines.find(f => f.instId === op.instId); if (!f) return;
+      f.label = op.label;
       break;
     }
     case 'add-inventory': {
@@ -668,16 +727,53 @@ function renderFigurines() {
   const layer = $('#figurineLayer'); if (!layer) return;
   layer.innerHTML = '';
   for (const f of s.table.figurines) {
-    const url = ASSETS[f.assetHash];
-    const opacity = f.opacity != null ? f.opacity : 1;
+    let url, isChar = f.kind === 'character', charPlayer = null, ringColor = null;
+    if (isChar) {
+      charPlayer = s.hands[f.playerId];
+      const pfpHash = charPlayer?.pfpHash;
+      url = pfpHash ? ASSETS[pfpHash] : null;
+      ringColor = charPlayer?.color || '#3b82f6';
+    } else {
+      url = ASSETS[f.assetHash];
+    }
+    const eff = f.effects || {};
+    let opacity = f.opacity != null ? f.opacity : 1;
+    if (eff.invisible) opacity *= 0.35;
     const sx = f.flipH ? -1 : 1, sy = f.flipV ? -1 : 1;
     const tf = `rotate(${f.rot||0}deg) scale(${sx},${sy})`;
-    const div = el('div', { class:'figurine' + (f.locked ? ' locked' : ''), style:{ left:f.x+'px', top:f.y+'px', width:f.w+'px', height:f.h+'px', transform:tf, zIndex:f.z||1, opacity } });
+    const classes = 'figurine'
+      + (f.locked ? ' locked' : '')
+      + (isChar ? ' character' : '')
+      + (eff.sneaking ? ' sneaking' : '')
+      + (eff.down ? ' downed' : '');
+    const style = { left:f.x+'px', top:f.y+'px', width:f.w+'px', height:f.h+'px', transform:tf, zIndex:f.z||1, opacity };
+    if (isChar) style.borderColor = ringColor;
+    const div = el('div', { class:classes, style });
     if (url) div.appendChild(el('img', { class:'figurine-img', src:url, draggable:'false' }));
-    else div.appendChild(el('div', { class:'figurine-loading' }, 'Loading...'));
-    if (f.label) div.appendChild(el('div', { class:'figurine-label' }, f.label));
+    else div.appendChild(el('div', { class:'figurine-loading' }, isChar ? (charPlayer?.name || '?') : 'Loading...'));
+    if (isChar) {
+      const tag = el('div', { class:'character-nametag', style:{ background: ringColor } }, charPlayer?.name || f.playerId);
+      div.appendChild(tag);
+    } else if (f.label) {
+      div.appendChild(el('div', { class:'figurine-label' }, f.label));
+    }
+    // Effect badges (skip on non-characters too — generic tokens can carry effects)
+    const badges = [];
+    if (eff.attacking) badges.push(['⚔️','attacking','Attacking']);
+    if (eff.bleeding) badges.push(['🩸','bleeding','Bleeding']);
+    if (eff.poisoned) badges.push(['☠️','poisoned','Poisoned']);
+    if (eff.stunned) badges.push(['💫','stunned','Stunned']);
+    if (eff.defending) badges.push(['🛡️','defending','Defending']);
+    if (eff.invisible) badges.push(['👻','invisible','Invisible']);
+    if (eff.sneaking) badges.push(['🌫️','sneaking','Sneaking']);
+    if (eff.down) badges.push(['💀','down','Down']);
+    if (badges.length) {
+      const bar = el('div', { class:'effect-bar' });
+      for (const [icon, cls, title] of badges) bar.appendChild(el('span', { class:'effect-badge effect-'+cls, title }, icon));
+      div.appendChild(bar);
+    }
     if (f.locked) div.appendChild(el('div', { class:'figurine-lock-icon', title:'Locked' }, '🔒'));
-    if (ROLE === 'gm' && !f.locked) {
+    if (!f.locked) {
       makeDraggable(div, (x,y) => sendOp({ type:'move-figurine', instId:f.instId, x, y }));
       // resize handle
       const handle = el('div', { class:'figurine-resize' });
@@ -700,12 +796,10 @@ function renderFigurines() {
       });
       div.appendChild(handle);
     }
-    if (ROLE === 'gm') {
-      div.addEventListener('contextmenu', e => {
-        e.preventDefault();
-        showFigurineContextMenu(f, e);
-      });
-    }
+    div.addEventListener('contextmenu', e => {
+      e.preventDefault();
+      showFigurineContextMenu(f, e);
+    });
     layer.appendChild(div);
   }
 }
@@ -983,13 +1077,30 @@ function showCardContextMenu(info, e) {
   }
   showMenu(items, e.clientX, e.clientY);
 }
+const STATUS_EFFECTS = [
+  ['attacking', '⚔️ Attacking'],
+  ['defending', '🛡️ Defending'],
+  ['bleeding',  '🩸 Bleeding'],
+  ['poisoned',  '☠️ Poisoned'],
+  ['stunned',   '💫 Stunned'],
+  ['invisible', '👻 Invisible'],
+  ['sneaking',  '🌫️ Sneaking'],
+  ['down',      '💀 Down'],
+];
 function showFigurineContextMenu(f, e) {
+  const eff = f.effects || {};
   const items = [
     { label: f.locked ? '🔓 Unlock' : '🔒 Lock', action: () => sendOp({ type:'move-figurine', instId:f.instId, locked: !f.locked }) },
     { label:'Rename / Label...', action: () => {
         const v = prompt('Label (blank to clear):', f.label || '');
-        if (v != null) sendOp({ type:'move-figurine', instId:f.instId, label: v });
+        if (v != null) sendOp({ type:'set-figurine-label', instId:f.instId, label: v });
       } },
+    '-',
+    // Status effects — toggle each.
+    ...STATUS_EFFECTS.map(([key, label]) => ({
+      label: (eff[key] ? '✓ ' : '  ') + label,
+      action: () => sendOp({ type:'toggle-effect', instId:f.instId, effect:key }),
+    })),
     '-',
     { label:'Rotate +15°', action: () => sendOp({ type:'move-figurine', instId:f.instId, rot:(f.rot||0)+15 }) },
     { label:'Rotate -15°', action: () => sendOp({ type:'move-figurine', instId:f.instId, rot:(f.rot||0)-15 }) },
@@ -1241,7 +1352,7 @@ function setTool(t) {
 }
 
 // =================== Asset upload ===================
-async function compressImage(file, maxDim, quality) {
+async function compressImage(file, maxDim, quality, mime) {
   const img = new Image();
   const url = URL.createObjectURL(file);
   await new Promise(r => { img.onload = r; img.src = url; });
@@ -1252,9 +1363,13 @@ async function compressImage(file, maxDim, quality) {
   }
   const canvas = document.createElement('canvas');
   canvas.width = width; canvas.height = height;
-  canvas.getContext('2d').drawImage(img, 0, 0, width, height);
+  const ctx = canvas.getContext('2d');
+  // For PNG we leave the canvas transparent so alpha is preserved; JPEG must be opaque.
+  const outMime = mime || (file.type === 'image/png' ? 'image/png' : 'image/jpeg');
+  if (outMime === 'image/jpeg') { ctx.fillStyle = '#ffffff'; ctx.fillRect(0,0,width,height); }
+  ctx.drawImage(img, 0, 0, width, height);
   URL.revokeObjectURL(url);
-  return canvas.toDataURL('image/jpeg', quality);
+  return canvas.toDataURL(outMime, quality);
 }
 
 async function uploadPfp(pid, file) {
@@ -1276,14 +1391,21 @@ async function uploadPfp(pid, file) {
 }
 
 async function uploadFigurine(file, kind='figurine') {
-  if (!file || ROLE !== 'gm') return;
-  const dataUrl = await compressImage(file, 2048, 0.85);
+  if (!file) return;
+  // Use PNG to preserve transparency for tokens; JPEG fine for maps where size matters.
+  const dataUrl = await compressImage(file, kind === 'map' ? 2048 : 1024, 0.9, kind === 'map' ? 'image/jpeg' : 'image/png');
   const hash = await hashBlob(dataUrl);
   ASSETS[hash] = dataUrl;
   await cacheAssetPut(hash, { kind, dataUrl });
-  STATE.assetMeta[hash] = { kind, size: dataUrl.length };
-  for (const c of Object.values(connections)) sendAsset(c, hash, dataUrl, kind);
-  sendOp({ type:'add-figurine', hash, w: kind==='map'?600:120, h: kind==='map'?400:120 });
+  if (ROLE === 'gm') {
+    STATE.assetMeta[hash] = { kind, size: dataUrl.length };
+    for (const c of Object.values(connections)) sendAsset(c, hash, dataUrl, kind);
+    sendOp({ type:'add-figurine', hash, w: kind==='map'?600:120, h: kind==='map'?400:120, by: 'gm' });
+  } else {
+    // Player upload: ship the asset to the GM (who relays to other players), then ask GM to spawn the figurine.
+    sendAsset(connections.gm, hash, dataUrl, kind);
+    sendToGM({ type:'op', op:{ type:'add-figurine', hash, w: kind==='map'?600:120, h: kind==='map'?400:120, by: MY_ID }});
+  }
 }
 
 // =================== Setup wizards ===================
@@ -1303,13 +1425,24 @@ function gmSetupFlow() {
   autosave();
 }
 
+function updateJoinSlotSelect() {
+  const sel = $('#joinSlotSel'); if (!sel) return;
+  const taken = window._takenSlots || [];
+  for (const opt of sel.options) {
+    const isTaken = taken.includes(opt.value);
+    opt.disabled = isTaken;
+    const base = 'Slot ' + opt.value.slice(6);
+    opt.textContent = isTaken ? base + ' (taken)' : base;
+  }
+}
+
 function playerJoinFlow() {
   const overlay = el('div', { class:'join-overlay' });
   const box = el('div', { class:'join-box' });
   box.appendChild(el('h2', {}, 'Join Deck Quest'));
   const roomI = el('input', { type:'text', placeholder:'Room code (from GM)' });
   const nameI = el('input', { type:'text', placeholder:'Your name' });
-  const slotSel = el('select', {});
+  const slotSel = el('select', { id: 'joinSlotSel' });
   for (let i=1;i<=10;i++) slotSel.appendChild(el('option', { value:'player'+i }, 'Slot '+i));
   const pfpI = el('input', { type:'file', accept:'image/*' });
   const btn = el('button', { class:'primary', onclick: async () => {
@@ -1475,16 +1608,17 @@ function setupToolbarUI() {
   const colorI = el('input', { type:'color', value: currentColor });
   colorI.addEventListener('change', e => currentColor = e.target.value);
   tb.appendChild(colorI);
+  // Map + Token uploads — available to everyone.
+  const mapBtn = el('label', { class:'tool-btn' }, '+ Add Map');
+  const mapI = el('input', { type:'file', accept:'image/*', style:{display:'none'}});
+  mapI.addEventListener('change', e => { uploadFigurine(e.target.files[0], 'map'); mapI.value=''; });
+  mapBtn.appendChild(mapI); tb.appendChild(mapBtn);
+  const tokenBtn = el('label', { class:'tool-btn' }, '+ Add Token');
+  const tokenI = el('input', { type:'file', accept:'image/*', style:{display:'none'}});
+  tokenI.addEventListener('change', e => { uploadFigurine(e.target.files[0], 'figurine'); tokenI.value=''; });
+  tokenBtn.appendChild(tokenI); tb.appendChild(tokenBtn);
   if (ROLE === 'gm') {
     tb.appendChild(el('button', { onclick: () => sendOp({ type:'clear-drawings' }) }, 'Clear drawings'));
-    const mapBtn = el('label', { class:'tool-btn' }, '+ Add Map');
-    const mapI = el('input', { type:'file', accept:'image/*', style:{display:'none'}});
-    mapI.addEventListener('change', e => uploadFigurine(e.target.files[0], 'map'));
-    mapBtn.appendChild(mapI); tb.appendChild(mapBtn);
-    const tokenBtn = el('label', { class:'tool-btn' }, '+ Add Token');
-    const tokenI = el('input', { type:'file', accept:'image/*', style:{display:'none'}});
-    tokenI.addEventListener('change', e => uploadFigurine(e.target.files[0], 'figurine'));
-    tokenBtn.appendChild(tokenI); tb.appendChild(tokenBtn);
     const searchBtn = el('button', { onclick: () => openSearch() }, 'Search cards');
     tb.appendChild(searchBtn);
   } else {
