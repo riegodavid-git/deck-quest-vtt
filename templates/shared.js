@@ -227,12 +227,14 @@ function viewFor(playerId) {
   const s = STATE;
   const view = JSON.parse(JSON.stringify({
     roomCode: s.roomCode, playerCount: s.playerCount,
-    decks: Object.fromEntries(Object.entries(s.decks).map(([k,v])=>[k,v.length])), // counts only
+    decks: Object.fromEntries(Object.entries(s.decks).map(([k,v])=>[k,v.length])),
     discards: s.discards,
     table: s.table,
     hands: {},
     assetMeta: s.assetMeta,
     log: s.log,
+    chat: s.chat || [],
+    music: s.music || {},
   }));
   for (const [pid, p] of Object.entries(s.hands)) {
     if (pid === 'gm') continue; // never send GM hand to players
@@ -744,32 +746,40 @@ function applyOp(op, by) {
     }
     case 'music-load': {
       if (!s.music) s.music = {};
+      const prevMusicLoad = { ...s.music };
       s.music.videoId = op.videoId;
       s.music.title   = op.title || op.videoId;
       s.music.playing = false;
       s.music.currentTime = 0;
       s.music.syncedAt = Date.now();
+      if (ROLE === 'gm') syncMusicPlayer(prevMusicLoad, s.music);
       break;
     }
     case 'music-play': {
       if (!s.music) break;
+      const prevMusicPlay = { ...s.music };
       s.music.playing     = true;
       s.music.currentTime = op.currentTime || 0;
       s.music.syncedAt    = Date.now();
+      if (ROLE === 'gm') syncMusicPlayer(prevMusicPlay, s.music);
       break;
     }
     case 'music-pause': {
       if (!s.music) break;
+      const prevMusicPause = { ...s.music };
       s.music.playing     = false;
       s.music.currentTime = op.currentTime || 0;
       s.music.syncedAt    = Date.now();
+      if (ROLE === 'gm') syncMusicPlayer(prevMusicPause, s.music);
       break;
     }
     case 'music-stop': {
       if (!s.music) break;
+      const prevMusicStop = { ...s.music };
       s.music.playing = false;
       s.music.currentTime = 0;
       s.music.syncedAt = Date.now();
+      if (ROLE === 'gm') syncMusicPlayer(prevMusicStop, s.music);
       break;
     }
   }
@@ -2511,7 +2521,7 @@ function renderChatPanel() {
 // =================== Music player ===================
 let _ytPlayer = null;
 let _ytReady = false;
-let _ytPendingLoad = null;
+let _ytPendingLoad = null; // { videoId, currentTime, playing }
 
 function loadYouTubeAPI() {
   if (window.YT && window.YT.Player) { _ytReady = true; return; }
@@ -2522,19 +2532,21 @@ function loadYouTubeAPI() {
   document.head.appendChild(tag);
   window.onYouTubeIframeAPIReady = () => {
     _ytReady = true;
-    const container = $('#ytPlayer');
-    if (!container) return;
-    _ytPlayer = new YT.Player(container, {
+    if (!document.getElementById('ytPlayer')) return;
+    _ytPlayer = new YT.Player('ytPlayer', {
       height: '0', width: '0',
-      playerVars: { autoplay: 0, controls: 0 },
+      playerVars: { autoplay: 1, controls: 0, origin: location.origin || '*' },
       events: {
         onReady: () => {
           const volEl = $('#musicVolume');
           if (volEl) _ytPlayer.setVolume(parseInt(volEl.value, 10));
-          if (_ytPendingLoad) { _ytPlayer.loadVideoById(_ytPendingLoad); _ytPendingLoad = null; }
+          if (_ytPendingLoad) {
+            const p = _ytPendingLoad; _ytPendingLoad = null;
+            _ytPlayer.loadVideoById({ videoId: p.videoId, startSeconds: p.currentTime || 0 });
+            if (!p.playing) _ytPlayer.pauseVideo();
+          }
         },
         onStateChange: ev => {
-          // If ended, update state
           if (ev.data === YT.PlayerState.ENDED && ROLE === 'gm') {
             sendOp({ type: 'music-stop' });
           }
@@ -2644,22 +2656,26 @@ function syncMusicPlayerUI() {
 
 function syncMusicPlayer(prevMusic, music) {
   if (!music || !music.videoId) return;
+  const elapsed = music.playing ? (Date.now() - (music.syncedAt || 0)) / 1000 : 0;
+  const targetTime = (music.currentTime || 0) + elapsed;
   if (!_ytReady || !_ytPlayer) {
-    if (music.videoId) _ytPendingLoad = music.videoId;
+    // Store full intent — applied once the YT API fires onReady
+    _ytPendingLoad = { videoId: music.videoId, currentTime: targetTime, playing: music.playing };
     return;
   }
   const prevId = prevMusic?.videoId;
-  // New video
   if (music.videoId !== prevId) {
-    _ytPlayer.loadVideoById({ videoId: music.videoId, startSeconds: music.currentTime || 0 });
-    if (!music.playing) _ytPlayer.pauseVideo();
+    // New video — load and seek; YT auto-plays when autoplay:1, so pause if needed
+    _ytPlayer.loadVideoById({ videoId: music.videoId, startSeconds: targetTime });
+    if (!music.playing) {
+      // Give the player a moment to load before pausing
+      setTimeout(() => { if (_ytPlayer) _ytPlayer.pauseVideo(); }, 500);
+    }
     return;
   }
   // Same video — sync play state
   if (music.playing) {
-    const elapsed = (Date.now() - (music.syncedAt || 0)) / 1000;
-    const target = (music.currentTime || 0) + elapsed;
-    _ytPlayer.seekTo(target, true);
+    _ytPlayer.seekTo(targetTime, true);
     _ytPlayer.playVideo();
   } else {
     _ytPlayer.seekTo(music.currentTime || 0, true);
