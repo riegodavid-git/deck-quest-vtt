@@ -228,7 +228,7 @@ function rollAndLog(spec) {
 // │  to Render.com, then run  node build.js  to rebuild the HTMLs.  │
 // │  Example: 'wss://deck-quest-relay.onrender.com'                 │
 // └─────────────────────────────────────────────────────────────────┘
-const RELAY_URL = 'wss://YOUR-APP-NAME.onrender.com';
+const RELAY_URL = 'wss://deck-quest-vtt.onrender.com';
 
 let wsConn = null;
 let connections = {};    // GM: { slot: fakeConn }. Player: { gm: fakeConn }
