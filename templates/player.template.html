@@ -63,7 +63,11 @@ button .icon + span, button span + .icon { margin-left:6px; }
 .panel-handle .icon { color:var(--accent); }
 .panel-hide-btn { background:transparent; border:none; color:var(--muted); padding:0 4px; cursor:pointer; display:inline-flex; align-items:center; justify-content:center; }
 .panel-hide-btn:hover { color:var(--accent); background:transparent; border:none; }
-#deckStacks, #discardStacks { display:flex; flex-direction:column; gap:10px; padding:8px; background:var(--glass-bg); backdrop-filter:var(--glass-blur); -webkit-backdrop-filter:var(--glass-blur); border:1px solid var(--line-strong); border-top:none; border-radius:0 0 var(--radius-lg) var(--radius-lg); box-shadow:0 8px 28px rgba(0,0,0,.5); }
+#deckStacks, #discardStacks { display:flex; flex-direction:column; gap:10px; padding:8px; background:var(--glass-bg); backdrop-filter:var(--glass-blur); -webkit-backdrop-filter:var(--glass-blur); border:1px solid var(--line-strong); border-top:none; border-radius:0 0 var(--radius-lg) var(--radius-lg); box-shadow:0 8px 28px rgba(0,0,0,.5); max-height:calc(100vh - 200px); overflow-y:auto; }
+#discardPanel { top:64px; right:20px; max-width:110px; }
+#discardTab   { top:160px; }
+#railTab      { top:88px; }
+#deckPanel { max-height:calc(100vh - 200px); overflow:visible; }
 @supports not (backdrop-filter: blur(1px)) {
   .panel-handle, #deckStacks, #discardStacks, .panel-tab, #logOverlay, .ctx-menu, .join-box, .token-box, #toolbar { background-color: var(--panel) !important; }
 }
@@ -230,6 +234,48 @@ button .icon + span, button span + .icon { margin-left:6px; }
 ::-webkit-scrollbar-track { background:transparent; }
 ::-webkit-scrollbar-thumb { background:var(--line); border-radius:5px; }
 ::-webkit-scrollbar-thumb:hover { background:var(--line-strong); }
+
+#chatOverlay { position:fixed; bottom:16px; left:412px; width:320px; height:240px; background:var(--glass-bg); backdrop-filter:var(--glass-blur); -webkit-backdrop-filter:var(--glass-blur); border:1px solid var(--line-strong); border-radius:var(--radius-lg); display:flex; flex-direction:column; z-index:100; box-shadow:0 8px 28px rgba(0,0,0,.6); overflow:hidden; }
+#chatHeader { display:flex; justify-content:space-between; align-items:center; padding:8px 12px; background:rgba(0,0,0,.55); border-bottom:1px solid var(--line); font:600 10px/1 var(--font-display); color:var(--parchment); text-transform:uppercase; letter-spacing:.18em; }
+#chatMessages { flex:1; overflow-y:auto; padding:8px 12px; display:flex; flex-direction:column; gap:4px; }
+.chat-msg { font:400 12px/1.5 var(--font-body); }
+.chat-msg-who { font:600 12px/1 var(--font-display); }
+.chat-msg-text { color:var(--text); }
+.chat-msg-me .chat-msg-text { color:var(--accent); }
+#chatInput { display:flex; gap:6px; padding:8px 10px; border-top:1px solid var(--line); }
+#chatInput input { flex:1; padding:5px 8px; font:400 12px/1.4 var(--font-body); background:rgba(0,0,0,.4); border:1px solid var(--line); border-radius:var(--radius); }
+#chatInput input:focus { border-color:var(--accent); outline:none; }
+#chatInput button { padding:5px 10px; font-size:11px; }
+#chatOverlay.collapsed { height:auto; }
+#chatOverlay.collapsed #chatMessages, #chatOverlay.collapsed #chatInput { display:none; }
+
+#musicOverlay { position:fixed; bottom:16px; right:16px; width:300px; background:var(--glass-bg); backdrop-filter:var(--glass-blur); -webkit-backdrop-filter:var(--glass-blur); border:1px solid var(--line-strong); border-radius:var(--radius-lg); display:flex; flex-direction:column; z-index:100; box-shadow:0 8px 28px rgba(0,0,0,.6); overflow:hidden; }
+#musicHeader { display:flex; justify-content:space-between; align-items:center; padding:8px 12px; background:rgba(0,0,0,.55); border-bottom:1px solid var(--line); font:600 10px/1 var(--font-display); color:var(--parchment); text-transform:uppercase; letter-spacing:.18em; }
+#musicBody { padding:10px 12px; display:flex; flex-direction:column; gap:8px; }
+#musicOverlay.collapsed #musicBody { display:none; }
+#musicNowPlaying { font:600 13px/1.3 var(--font-display); color:var(--accent); white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+.music-controls { display:flex; align-items:center; justify-content:center; gap:10px; }
+.music-controls button { width:36px; height:36px; border-radius:50%; display:flex; align-items:center; justify-content:center; padding:0; }
+.music-play-btn { width:44px !important; height:44px !important; background:var(--accent) !important; border-color:var(--accent) !important; color:#1a1612 !important; }
+.music-volume { display:flex; align-items:center; gap:8px; font:500 10px/1 var(--font-mono); color:var(--muted); }
+.music-volume input[type=range] { flex:1; accent-color:var(--accent); height:4px; cursor:pointer; }
+#musicUrlRow { display:flex; gap:6px; }
+#musicUrlRow input { flex:1; font:400 11px/1.4 var(--font-mono); padding:4px 8px; }
+#musicUrlRow button { padding:4px 10px; font-size:11px; }
+#ytPlayer { display:none; }
+
+.token-detail-popup { position:fixed; background:var(--glass-bg); backdrop-filter:var(--glass-blur); -webkit-backdrop-filter:var(--glass-blur); border:1px solid var(--line-strong); border-radius:var(--radius-lg); padding:14px 16px; z-index:2147483645; min-width:200px; box-shadow:0 8px 28px rgba(0,0,0,.7); display:flex; flex-direction:column; gap:10px; }
+.token-detail-popup h4 { margin:0; font:700 14px/1 var(--font-display); color:var(--accent); letter-spacing:.04em; }
+.token-detail-row { display:flex; align-items:center; gap:8px; }
+.token-detail-row label { font:600 9px/1 var(--font-mono); color:var(--parchment); text-transform:uppercase; letter-spacing:.12em; width:50px; flex-shrink:0; }
+.token-detail-row input { flex:1; padding:4px 8px; font:500 13px/1 var(--font-mono); }
+
+.fig-vitals { position:absolute; bottom:calc(100% + 4px); left:50%; transform:translateX(-50%); display:flex; flex-direction:column; gap:2px; pointer-events:none; white-space:nowrap; min-width:60px; }
+.figurine.character .fig-vitals { bottom:auto; top:calc(100% + 6px); }
+.fig-bar-wrap { height:5px; border-radius:3px; background:rgba(0,0,0,.55); overflow:hidden; border:1px solid rgba(255,255,255,.1); }
+.fig-bar-hp   { height:100%; border-radius:3px; background:#e05555; transition:width .3s; }
+.fig-bar-armor{ height:100%; border-radius:3px; background:#5588cc; transition:width .3s; }
+.fig-skull { position:absolute; inset:0; display:flex; align-items:center; justify-content:center; font-size:40px; background:rgba(0,0,0,.6); border-radius:inherit; pointer-events:none; z-index:2; }
 </style>
 </head>
 <body>
@@ -267,10 +313,44 @@ button .icon + span, button span + .icon { margin-left:6px; }
   <div id="diceRow"></div>
   <div id="logEntries"></div>
 </div>
+<div id="chatOverlay">
+  <div id="chatHeader">
+    <span>Chat</span>
+    <button class="log-toggle" id="chatToggle" title="Toggle chat"></button>
+  </div>
+  <div id="chatMessages"></div>
+  <div id="chatInput">
+    <input type="text" id="chatInputField" placeholder="Message…" autocomplete="off">
+    <button id="chatSendBtn">Send</button>
+  </div>
+</div>
+<div id="musicOverlay">
+  <div id="musicHeader">
+    <span>Music</span>
+    <button class="log-toggle" id="musicToggle" title="Toggle music player"></button>
+  </div>
+  <div id="musicBody">
+    <div id="musicNowPlaying">No track loaded</div>
+    <div class="music-controls">
+      <button class="tool-btn" id="musicPrevBtn" title="Restart"></button>
+      <button class="tool-btn music-play-btn" id="musicPlayBtn" title="Play / Pause"></button>
+      <button class="tool-btn" id="musicStopBtn" title="Stop"></button>
+    </div>
+    <div class="music-volume">
+      <span>Vol</span>
+      <input type="range" id="musicVolume" min="0" max="100" value="70">
+      <span id="musicVolLabel">70%</span>
+    </div>
+  </div>
+</div>
+<div id="ytPlayer"></div>
+<script type="application/json" id="_cards_data">%%CARDS_JSON%%</script>
+<script type="application/json" id="_tokens_data">%%TOKENS_JSON%%</script>
 <script>
 const ROLE = 'player';
-const CARDS  = %%CARDS_JSON%%;
-const TOKENS = %%TOKENS_JSON%%;
+const _cardsEl = document.getElementById('_cards_data');
+const CARDS = JSON.parse(_cardsEl.textContent);
+_cardsEl.remove();
 %%SHARED_JS%%
 </script>
 </body>

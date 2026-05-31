@@ -17,9 +17,25 @@ const CARDS_BY_ID = {};
 const CARDS_BY_TYPE = { role:[], skill:[], item:[], location:[], adversary:[], info:[] };
 for (const c of CARDS) { CARDS_BY_ID[c.id] = c; CARDS_BY_TYPE[c.type].push(c); }
 
-// Built-in token lookup — id → token object
+// Built-in token lookup — id → token object (populated lazily on first token-panel open)
 const TOKENS_BY_ID = {};
-for (const t of TOKENS) TOKENS_BY_ID[t.id] = t;
+let _tokensLoaded = false;
+let _tokensLoadPromise = null;
+function ensureTokens() {
+  if (_tokensLoaded) return Promise.resolve();
+  if (_tokensLoadPromise) return _tokensLoadPromise;
+  _tokensLoadPromise = new Promise(resolve => {
+    const el = document.getElementById('_tokens_data');
+    if (!el) { _tokensLoaded = true; resolve(); return; }
+    // JSON.parse is ~10-50x faster than the equivalent JS literal parse
+    const list = JSON.parse(el.textContent);
+    el.remove();
+    for (const t of list) TOKENS_BY_ID[t.id] = t;
+    _tokensLoaded = true;
+    resolve();
+  });
+  return _tokensLoadPromise;
+}
 
 // Multi-select — set of instIds currently selected
 const selectionSet = new Set();
@@ -99,12 +115,14 @@ function applyTableTransform() {
 }
 function migrateState(state) {
   if (!state || !state.hands) return;
-  // Old shape: s.hands.gm = []. New shape: { name, color, hand: [] }.
   if (Array.isArray(state.hands.gm)) {
     state.hands.gm = { name:'GM', color:'#3b82f6', hand: state.hands.gm };
   } else if (state.hands.gm && !state.hands.gm.hand) {
     state.hands.gm.hand = [];
   }
+  if (!state.chat) state.chat = [];
+  if (!state.music) state.music = { videoId: null, title: 'No track loaded', playing: false, currentTime: 0, syncedAt: 0 };
+  if (state.gmNotes === undefined) state.gmNotes = '';
 }
 function normalizeZ(state) {
   // Re-sequence all card/figurine z values to small ints, preserving visual order.
@@ -196,8 +214,11 @@ function newState(playerCount) {
     decks, discards,
     table: { cards: [], figurines: [], drawings: [] },
     hands,
-    assetMeta: {},   // hash -> { kind, size }
+    assetMeta: {},
     log: [],
+    chat: [],
+    music: { videoId: null, title: 'No track loaded', playing: false, currentTime: 0, syncedAt: 0 },
+    gmNotes: '',
   };
 }
 
@@ -462,10 +483,13 @@ function handleFromPlayer(conn, data) {
 function handleFromGM(data) {
   if (['asset-begin','asset-chunk','asset-end'].includes(data.type)) return handleAssetMessage(data, connections.gm);
   if (data.type === 'state') {
+    const prevMusic = LOCAL_VIEW?.music;
     LOCAL_VIEW = data.view;
     if (data.myId) MY_ID = data.myId;
     rerenderAll();
     requestMissingAssets(LOCAL_VIEW.assetMeta);
+    syncMusicPlayer(prevMusic, LOCAL_VIEW.music);
+    renderChatPanel();
     return;
   }
   if (data.type === 'cursor-update') {
@@ -696,6 +720,58 @@ function applyOp(op, by) {
       }
       break;
     }
+    case 'send-chat': {
+      if (!s.chat) s.chat = [];
+      s.chat.push({ who: op.who, text: op.text, color: op.color || 'var(--text)', ts: op.ts || Date.now() });
+      if (s.chat.length > 200) s.chat.splice(0, s.chat.length - 200);
+      // Don't rerenderAll for chat — just update the chat panel
+      broadcast({ type:'state' });
+      renderAllGM();
+      autosave();
+      return;
+    }
+    case 'set-figurine-vitals': {
+      const f = s.table.figurines.find(x => x.instId === op.instId); if (!f) break;
+      if (op.hp  !== undefined) f.hp   = op.hp;
+      if (op.armor !== undefined) f.armor = op.armor;
+      break;
+    }
+    case 'set-gm-notes': {
+      s.gmNotes = op.text || '';
+      // GM notes are local — no broadcast needed, but we autosave
+      autosave();
+      return;
+    }
+    case 'music-load': {
+      if (!s.music) s.music = {};
+      s.music.videoId = op.videoId;
+      s.music.title   = op.title || op.videoId;
+      s.music.playing = false;
+      s.music.currentTime = 0;
+      s.music.syncedAt = Date.now();
+      break;
+    }
+    case 'music-play': {
+      if (!s.music) break;
+      s.music.playing     = true;
+      s.music.currentTime = op.currentTime || 0;
+      s.music.syncedAt    = Date.now();
+      break;
+    }
+    case 'music-pause': {
+      if (!s.music) break;
+      s.music.playing     = false;
+      s.music.currentTime = op.currentTime || 0;
+      s.music.syncedAt    = Date.now();
+      break;
+    }
+    case 'music-stop': {
+      if (!s.music) break;
+      s.music.playing = false;
+      s.music.currentTime = 0;
+      s.music.syncedAt = Date.now();
+      break;
+    }
   }
   broadcast({ type:'state' });
   renderAllGM();
@@ -756,10 +832,10 @@ function rerenderAll() {
   });
 }
 function renderAllGM() {
-  renderTopbar(); renderTable(); renderRightRail(); renderLog();
+  renderTopbar(); renderTable(); renderRightRail(); renderLog(); renderChatPanel(); syncMusicPlayerUI();
 }
 function renderAllPlayer() {
-  renderTopbarPlayer(); renderTable(); renderRightRailPlayer(); renderLog();
+  renderTopbarPlayer(); renderTable(); renderRightRailPlayer(); renderLog(); renderChatPanel(); syncMusicPlayerUI();
 }
 
 function renderTopbar() {
@@ -882,6 +958,27 @@ function renderFigurines() {
     } else if (f.label) {
       div.appendChild(el('div', { class:'figurine-label' }, f.label));
     }
+    // HP / Armor vitals bars — non-character tokens use f.hp / f.armor; character tokens use player sheet
+    const hp    = isChar ? charPlayer?.hp    : f.hp;
+    const armor = isChar ? charPlayer?.armor : f.armor;
+    if (hp) {
+      const vitalsDiv = el('div', { class:'fig-vitals' });
+      const hpPct = Math.max(0, Math.min(100, hp.max > 0 ? (hp.current / hp.max) * 100 : 100));
+      const hpWrap = el('div', { class:'fig-bar-wrap', style:{ width: Math.max(f.w, 48) + 'px' } });
+      hpWrap.appendChild(el('div', { class:'fig-bar-hp', style:{ width: hpPct + '%' } }));
+      vitalsDiv.appendChild(hpWrap);
+      if (armor && armor.current > 0) {
+        const arPct = Math.max(0, Math.min(100, armor.max > 0 ? (armor.current / armor.max) * 100 : 100));
+        const arWrap = el('div', { class:'fig-bar-wrap', style:{ width: Math.max(f.w, 48) + 'px' } });
+        arWrap.appendChild(el('div', { class:'fig-bar-armor', style:{ width: arPct + '%' } }));
+        vitalsDiv.appendChild(arWrap);
+      }
+      div.appendChild(vitalsDiv);
+      // Skull overlay when HP is 0
+      if (hp.current <= 0) {
+        div.appendChild(el('div', { class:'fig-skull' }, '💀'));
+      }
+    }
     // Effect badges (skip on non-characters too — generic tokens can carry effects)
     const badges = [];
     if (eff.attacking) badges.push(['⚔️','attacking','Attacking']);
@@ -905,16 +1002,17 @@ function renderFigurines() {
       handle.addEventListener('mousedown', e => {
         e.stopPropagation(); e.preventDefault();
         const startX = e.clientX, startY = e.clientY, w0 = f.w, h0 = f.h;
+        const size0 = Math.max(w0, h0);
         const onMove = ev => {
-          const nw = Math.max(40, w0 + (ev.clientX - startX) / tableZoom);
-          const nh = Math.max(40, h0 + (ev.clientY - startY) / tableZoom);
-          div.style.width = nw+'px'; div.style.height = nh+'px';
+          const delta = ((ev.clientX - startX) + (ev.clientY - startY)) / 2 / tableZoom;
+          const ns = Math.max(40, size0 + delta);
+          div.style.width = ns+'px'; div.style.height = ns+'px';
         };
-        const onUp = ev => {
+        const onUp = () => {
           window.removeEventListener('mousemove', onMove);
           window.removeEventListener('mouseup', onUp);
-          const nw = parseInt(div.style.width,10), nh = parseInt(div.style.height,10);
-          sendOp({ type:'move-figurine', instId:f.instId, w:nw, h:nh });
+          const ns = parseInt(div.style.width, 10);
+          sendOp({ type:'move-figurine', instId:f.instId, w:ns, h:ns });
         };
         window.addEventListener('mousemove', onMove);
         window.addEventListener('mouseup', onUp);
@@ -972,6 +1070,23 @@ function renderRightRail() {
   const s = activeState(); if (!s) return;
   const rail = $('#rightRail'); if (!rail) return;
   rail.innerHTML = '';
+  // GM private notes (GM only)
+  if (ROLE === 'gm') {
+    const notes = el('details', { id:'gmNotesPanel' });
+    const summary = el('summary', {}, 'GM Notes');
+    const ta = el('textarea', { placeholder:'Private notes (not visible to players)…', rows:'5' }, s.gmNotes || '');
+    let notesTimer = null;
+    ta.addEventListener('input', () => {
+      clearTimeout(notesTimer);
+      notesTimer = setTimeout(() => {
+        STATE.gmNotes = ta.value;
+        autosave();
+      }, 500);
+    });
+    notes.appendChild(summary);
+    notes.appendChild(ta);
+    rail.appendChild(notes);
+  }
   // GM hand tab
   rail.appendChild(playerPanel('gm', s.hands.gm));
   for (let i=1;i<=s.playerCount;i++) {
@@ -1383,6 +1498,7 @@ function showFigurineContextMenu(f, e) {
         const v = prompt('Label (blank to clear):', f.label || '');
         if (v != null) sendOp({ type:'set-figurine-label', instId:f.instId, label: v });
       } },
+    { label:'❤ Edit HP / Armor...', action: () => showTokenDetailPopup(f, e) },
     '-',
     // Status effects — toggle each.
     ...STATUS_EFFECTS.map(([key, label]) => ({
@@ -1640,8 +1756,6 @@ function setupTableInteraction() {
     tablePanY = my - (my - tablePanY) * (newZoom / tableZoom);
     tableZoom = newZoom;
     applyTableTransform();
-    const sl = $('#zoomSlider');
-    if (sl) sl.value = String(Math.round(tableZoom * 100) / 100);
   }, { passive: false });
 
   stage.addEventListener('mousemove', e => {
@@ -1966,6 +2080,10 @@ async function boot() {
   setupFloatingPanels();
   setupAltPreview();
   setupLogToggle();
+  setupChatUI();
+  setupMusicPlayer();
+  // Load tokens in background so placed tokens render after session restore
+  ensureTokens().then(() => { if (activeState()) renderTable(); });
   if (ROLE === 'gm') gmSetupFlow();
   else playerJoinFlow();
 }
@@ -2086,7 +2204,7 @@ function openTokenPanel() {
 
   // Header
   const hdr = el('div', { class: 'token-header' });
-  hdr.appendChild(el('span', {}, '🎭 D&D Token Collection'));
+  hdr.appendChild(el('span', {}, 'D&D Token Collection'));
   const searchI = el('input', { type: 'text', placeholder: 'Search by name or category…', class: 'token-search' });
   hdr.appendChild(searchI);
   hdr.appendChild(el('button', { class: 'mini', onclick: () => overlay.remove() }, '×'));
@@ -2099,6 +2217,17 @@ function openTokenPanel() {
 
   // Close on backdrop click
   overlay.addEventListener('click', e => { if (e.target === overlay) overlay.remove(); });
+
+  // Show loading spinner until tokens are parsed
+  if (!_tokensLoaded) {
+    content.appendChild(el('div', { class: 'token-empty' }, 'Loading tokens… (first open only)'));
+    ensureTokens().then(() => {
+      content.innerHTML = '';
+      render(searchI.value);
+    });
+    searchI.addEventListener('input', () => { if (_tokensLoaded) render(searchI.value); });
+    return;
+  }
 
   function addTokenToTable(t) {
     const stage = $('#tableStage');
@@ -2119,7 +2248,7 @@ function openTokenPanel() {
   function buildTree() {
     // tree[cat][subcat|'_root'] = [tokens]
     const tree = {};
-    for (const t of TOKENS) {
+    for (const t of Object.values(TOKENS_BY_ID)) {
       const cat = t.cats[0] || 'Uncategorized';
       const sub = t.cats[1] || '_root';
       if (!tree[cat]) tree[cat] = {};
@@ -2145,7 +2274,7 @@ function openTokenPanel() {
 
     if (query) {
       // Flat filtered results
-      const hits = TOKENS.filter(t =>
+      const hits = Object.values(TOKENS_BY_ID).filter(t =>
         t.name.toLowerCase().includes(query) ||
         t.cats.join(' ').toLowerCase().includes(query)
       );
@@ -2214,35 +2343,12 @@ function setupToolbarUI() {
   const colorI = el('input', { type:'color', value: currentColor, title:'Pen color', style:{width:'28px',height:'28px',padding:'0',cursor:'pointer'} });
   colorI.addEventListener('change', e => currentColor = e.target.value);
   tb.appendChild(colorI);
-  // Zoom slider
-  const zoomSlider = el('input', { id:'zoomSlider', type:'range', min:'0.2', max:'4', step:'0.05', value:'1', title:'Zoom (scroll wheel also works)', style:{width:'70px', cursor:'pointer'} });
-  zoomSlider.addEventListener('input', e => {
-    tableZoom = parseFloat(e.target.value);
-    applyTableTransform();
-  });
-  tb.appendChild(zoomSlider);
   const resetBtn = el('button', { class:'tool-btn', title:'Reset pan & zoom', onclick: () => {
     tableZoom = 1; tablePanX = 0; tablePanY = 0;
     applyTableTransform();
-    zoomSlider.value = '1';
   }});
   resetBtn.appendChild(icon('target'));
   tb.appendChild(resetBtn);
-  // Panel toggle buttons
-  const deckTglBtn = el('button', { class:'tool-btn', title:'Toggle deck panel', onclick: () => {
-    const p = $('#deckPanel'), t = $('#deckTab'); if (!p) return;
-    const collapsed = p.classList.toggle('collapsed');
-    if (t) t.style.display = collapsed ? 'block' : 'none';
-  }});
-  deckTglBtn.appendChild(icon('deck'));
-  tb.appendChild(deckTglBtn);
-  const discTglBtn = el('button', { class:'tool-btn', title:'Toggle discard panel', onclick: () => {
-    const p = $('#discardPanel'), t = $('#discardTab'); if (!p) return;
-    const collapsed = p.classList.toggle('collapsed');
-    if (t) t.style.display = collapsed ? 'block' : 'none';
-  }});
-  discTglBtn.appendChild(icon('discard'));
-  tb.appendChild(discTglBtn);
   // Token library panel
   const tokenLibBtn = el('button', { class:'tool-btn', title:'Browse & add D&D tokens', onclick: () => openTokenPanel() });
   tokenLibBtn.appendChild(icon('tokens'));
@@ -2354,6 +2460,259 @@ function setupFloatingPanels() {
       window.addEventListener('mouseup', onUp);
     });
   }
+}
+
+// =================== Chat panel ===================
+function setupChatUI() {
+  const overlay = $('#chatOverlay'); if (!overlay) return;
+  // Collapse toggle
+  const toggle = $('#chatToggle');
+  if (toggle) {
+    toggle.appendChild(icon('chevron-down'));
+    let collapsed = false;
+    toggle.addEventListener('click', () => {
+      collapsed = !collapsed;
+      overlay.classList.toggle('collapsed', collapsed);
+      toggle.replaceChildren(icon(collapsed ? 'chevron-up' : 'chevron-down'));
+    });
+  }
+  // Send on Enter or button click
+  const input = $('#chatInputField');
+  const sendBtn = $('#chatSendBtn');
+  const doSend = () => {
+    const text = input?.value?.trim();
+    if (!text) return;
+    const who = (ROLE === 'gm') ? (STATE?.hands?.gm?.name || 'GM') : MY_NAME;
+    const color = (ROLE === 'gm') ? (STATE?.hands?.gm?.color || '#f2ca50') : MY_COLOR;
+    sendOp({ type: 'send-chat', who, text, color, ts: Date.now() });
+    if (input) input.value = '';
+  };
+  if (input) input.addEventListener('keydown', e => { if (e.key === 'Enter') { e.preventDefault(); doSend(); } });
+  if (sendBtn) sendBtn.addEventListener('click', doSend);
+}
+
+function renderChatPanel() {
+  const s = activeState(); if (!s) return;
+  const container = $('#chatMessages'); if (!container) return;
+  const myWho = (ROLE === 'gm') ? (s.hands?.gm?.name || 'GM') : MY_NAME;
+  container.innerHTML = '';
+  for (const msg of (s.chat || [])) {
+    const isMe = msg.who === myWho;
+    const row = el('div', { class: 'chat-msg' + (isMe ? ' chat-msg-me' : '') });
+    const who = el('span', { class: 'chat-msg-who', style: { color: msg.color || 'var(--accent)' } }, msg.who + ': ');
+    const text = el('span', { class: 'chat-msg-text' }, msg.text);
+    row.appendChild(who);
+    row.appendChild(text);
+    container.appendChild(row);
+  }
+  container.scrollTop = container.scrollHeight;
+}
+
+// =================== Music player ===================
+let _ytPlayer = null;
+let _ytReady = false;
+let _ytPendingLoad = null;
+
+function loadYouTubeAPI() {
+  if (window.YT && window.YT.Player) { _ytReady = true; return; }
+  if (document.getElementById('_yt_api_script')) return;
+  const tag = document.createElement('script');
+  tag.id = '_yt_api_script';
+  tag.src = 'https://www.youtube.com/iframe_api';
+  document.head.appendChild(tag);
+  window.onYouTubeIframeAPIReady = () => {
+    _ytReady = true;
+    const container = $('#ytPlayer');
+    if (!container) return;
+    _ytPlayer = new YT.Player(container, {
+      height: '0', width: '0',
+      playerVars: { autoplay: 0, controls: 0 },
+      events: {
+        onReady: () => {
+          const volEl = $('#musicVolume');
+          if (volEl) _ytPlayer.setVolume(parseInt(volEl.value, 10));
+          if (_ytPendingLoad) { _ytPlayer.loadVideoById(_ytPendingLoad); _ytPendingLoad = null; }
+        },
+        onStateChange: ev => {
+          // If ended, update state
+          if (ev.data === YT.PlayerState.ENDED && ROLE === 'gm') {
+            sendOp({ type: 'music-stop' });
+          }
+        },
+      },
+    });
+  };
+}
+
+function ytVideoIdFromUrl(url) {
+  try {
+    const u = new URL(url);
+    if (u.hostname.includes('youtu.be')) return u.pathname.slice(1);
+    return u.searchParams.get('v') || null;
+  } catch { return null; }
+}
+
+function setupMusicPlayer() {
+  loadYouTubeAPI();
+  const toggle = $('#musicToggle');
+  if (toggle) {
+    toggle.appendChild(icon('chevron-down'));
+    let collapsed = false;
+    toggle.addEventListener('click', () => {
+      collapsed = !collapsed;
+      $('#musicOverlay')?.classList.toggle('collapsed', collapsed);
+      toggle.replaceChildren(icon(collapsed ? 'chevron-up' : 'chevron-down'));
+    });
+  }
+  // Volume (local only)
+  const volEl = $('#musicVolume');
+  const volLabel = $('#musicVolLabel');
+  if (volEl) {
+    volEl.addEventListener('input', () => {
+      const v = parseInt(volEl.value, 10);
+      if (volLabel) volLabel.textContent = v + '%';
+      if (_ytPlayer && _ytReady) _ytPlayer.setVolume(v);
+    });
+  }
+  // Play/Pause (GM only)
+  const playBtn = $('#musicPlayBtn');
+  if (playBtn) {
+    playBtn.appendChild(icon('target')); // placeholder, updated by syncMusicPlayerUI
+    if (ROLE === 'gm') {
+      playBtn.addEventListener('click', () => {
+        const s = activeState(); if (!s?.music) return;
+        if (s.music.playing) {
+          const ct = _ytPlayer ? _ytPlayer.getCurrentTime() : 0;
+          sendOp({ type: 'music-pause', currentTime: ct });
+        } else {
+          const ct = _ytPlayer ? _ytPlayer.getCurrentTime() : 0;
+          sendOp({ type: 'music-play', currentTime: ct });
+        }
+      });
+    } else {
+      playBtn.disabled = true;
+      playBtn.title = 'Only the GM can control playback';
+    }
+  }
+  // Restart (GM only)
+  const prevBtn = $('#musicPrevBtn');
+  if (prevBtn) {
+    prevBtn.appendChild(icon('refresh'));
+    if (ROLE === 'gm') {
+      prevBtn.addEventListener('click', () => sendOp({ type: 'music-play', currentTime: 0 }));
+    } else {
+      prevBtn.disabled = true;
+    }
+  }
+  // Stop (GM only)
+  const stopBtn = $('#musicStopBtn');
+  if (stopBtn) {
+    stopBtn.appendChild(icon('close'));
+    if (ROLE === 'gm') {
+      stopBtn.addEventListener('click', () => sendOp({ type: 'music-stop' }));
+    } else {
+      stopBtn.disabled = true;
+    }
+  }
+  // Load URL (GM only, element only exists in gm.html)
+  const loadBtn = $('#musicLoadBtn');
+  const urlInput = $('#musicUrlInput');
+  if (loadBtn && urlInput) {
+    const doLoad = () => {
+      const vid = ytVideoIdFromUrl(urlInput.value.trim());
+      if (!vid) { alert('Could not extract YouTube video ID from that URL.'); return; }
+      sendOp({ type: 'music-load', videoId: vid, title: urlInput.value.trim() });
+      urlInput.value = '';
+    };
+    loadBtn.addEventListener('click', doLoad);
+    urlInput.addEventListener('keydown', e => { if (e.key === 'Enter') doLoad(); });
+  }
+}
+
+function syncMusicPlayerUI() {
+  const s = activeState(); if (!s?.music) return;
+  const np = $('#musicNowPlaying');
+  const playBtn = $('#musicPlayBtn');
+  if (np) np.textContent = s.music.title || 'No track loaded';
+  if (playBtn) {
+    playBtn.replaceChildren(icon(s.music.playing ? 'close' : 'target')); // pause/play icon placeholder
+    // Use chevrons as stand-ins: chevron-right = play, chevron-down = pause
+    playBtn.replaceChildren(icon(s.music.playing ? 'chevron-down' : 'chevron-right'));
+    playBtn.title = s.music.playing ? 'Pause' : 'Play';
+  }
+}
+
+function syncMusicPlayer(prevMusic, music) {
+  if (!music || !music.videoId) return;
+  if (!_ytReady || !_ytPlayer) {
+    if (music.videoId) _ytPendingLoad = music.videoId;
+    return;
+  }
+  const prevId = prevMusic?.videoId;
+  // New video
+  if (music.videoId !== prevId) {
+    _ytPlayer.loadVideoById({ videoId: music.videoId, startSeconds: music.currentTime || 0 });
+    if (!music.playing) _ytPlayer.pauseVideo();
+    return;
+  }
+  // Same video — sync play state
+  if (music.playing) {
+    const elapsed = (Date.now() - (music.syncedAt || 0)) / 1000;
+    const target = (music.currentTime || 0) + elapsed;
+    _ytPlayer.seekTo(target, true);
+    _ytPlayer.playVideo();
+  } else {
+    _ytPlayer.seekTo(music.currentTime || 0, true);
+    _ytPlayer.pauseVideo();
+  }
+}
+
+// =================== Token detail popup ===================
+function showTokenDetailPopup(f, e) {
+  $$('.token-detail-popup').forEach(p => p.remove());
+  const isChar = f.kind === 'character';
+  const hp    = isChar ? activeState()?.hands?.[f.playerId]?.hp    : (f.hp || { current: 20, max: 20 });
+  const armor = isChar ? activeState()?.hands?.[f.playerId]?.armor : (f.armor || { current: 0, max: 10 });
+
+  const popup = el('div', { class: 'token-detail-popup', style: { left: e.clientX + 'px', top: e.clientY + 'px' } });
+  const closeBtn = el('button', { class: 'close-btn', onclick: () => popup.remove() }, '×');
+  popup.appendChild(closeBtn);
+  popup.appendChild(el('h4', {}, (f.label || f.kind || 'Token') + ' — Vitals'));
+
+  const makeRow = (labelText, cur, max, onChange) => {
+    const row = el('div', { class: 'token-detail-row' });
+    row.appendChild(el('label', {}, labelText));
+    const curI = el('input', { type:'number', value: String(cur), min:'0', style:{ width:'50px' } });
+    row.appendChild(curI);
+    row.appendChild(el('span', { style:{ color:'var(--muted)', margin:'0 4px' } }, '/'));
+    const maxI = el('input', { type:'number', value: String(max), min:'1', style:{ width:'50px' } });
+    row.appendChild(maxI);
+    const onChg = () => onChange(parseInt(curI.value,10)||0, parseInt(maxI.value,10)||1);
+    curI.addEventListener('change', onChg);
+    maxI.addEventListener('change', onChg);
+    return row;
+  };
+
+  if (isChar && f.playerId) {
+    popup.appendChild(makeRow('HP', hp.current, hp.max, (c, m) =>
+      sendOp({ type:'set-player-field', owner: f.playerId, path:'hp', value:{ current:c, max:m } })));
+    popup.appendChild(makeRow('Armor', armor.current, armor.max, (c, m) =>
+      sendOp({ type:'set-player-field', owner: f.playerId, path:'armor', value:{ current:c, max:m } })));
+  } else {
+    popup.appendChild(makeRow('HP', hp.current, hp.max, (c, m) =>
+      sendOp({ type:'set-figurine-vitals', instId: f.instId, hp:{ current:c, max:m } })));
+    popup.appendChild(makeRow('Armor', armor.current, armor.max, (c, m) =>
+      sendOp({ type:'set-figurine-vitals', instId: f.instId, armor:{ current:c, max:m } })));
+  }
+
+  document.body.appendChild(popup);
+  // Keep within viewport
+  const r = popup.getBoundingClientRect();
+  if (r.right  > window.innerWidth)  popup.style.left = (window.innerWidth  - r.width  - 8) + 'px';
+  if (r.bottom > window.innerHeight) popup.style.top  = (window.innerHeight - r.height - 8) + 'px';
+  // Close on outside click
+  const close = ev => { if (!popup.contains(ev.target)) { popup.remove(); document.removeEventListener('mousedown', close); } };
+  setTimeout(() => document.addEventListener('mousedown', close), 0);
 }
 
 window.addEventListener('DOMContentLoaded', boot);
