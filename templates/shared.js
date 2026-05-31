@@ -1113,6 +1113,10 @@ function showMenu(items, x, y) {
     m.appendChild(item);
   }
   document.body.appendChild(m);
+  // Reposition so the menu stays fully inside the viewport.
+  const r = m.getBoundingClientRect();
+  if (r.bottom > window.innerHeight) m.style.top  = Math.max(0, y - r.height) + 'px';
+  if (r.right  > window.innerWidth)  m.style.left = Math.max(0, x - r.width)  + 'px';
   setTimeout(() => document.addEventListener('click', () => m.remove(), { once:true }), 0);
 }
 function showDrawMenu(deckType, anchor) {
