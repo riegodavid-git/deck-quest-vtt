@@ -38,6 +38,16 @@ function uid() { return Math.random().toString(36).slice(2, 10); }
 function shuffle(a) { for (let i=a.length-1;i>0;i--){const j=Math.floor(Math.random()*(i+1));[a[i],a[j]]=[a[j],a[i]];} return a; }
 let _zCounter = 1;
 function nextZ() { return ++_zCounter; }
+
+// =================== Pan / zoom ===================
+let tableZoom = 1.0;
+let tablePanX = 0, tablePanY = 0;
+let spaceHeld = false, isPanning = false;
+let panStartX = 0, panStartY = 0, panOriginX = 0, panOriginY = 0;
+function applyTableTransform() {
+  const c = $('#tableContent');
+  if (c) c.style.transform = `translate(${tablePanX}px,${tablePanY}px) scale(${tableZoom})`;
+}
 function migrateState(state) {
   if (!state || !state.hands) return;
   // Old shape: s.hands.gm = []. New shape: { name, color, hand: [] }.
@@ -565,7 +575,6 @@ function applyOp(op, by) {
         const minZ = Math.min(...s.table.figurines.map(g => g.z||1));
         f.z = minZ - 1;
       }
-      else if (op.x != null || op.y != null) f.z = nextZ();
       break;
     }
     case 'remove-figurine': {
@@ -797,8 +806,8 @@ function renderFigurines() {
         e.stopPropagation(); e.preventDefault();
         const startX = e.clientX, startY = e.clientY, w0 = f.w, h0 = f.h;
         const onMove = ev => {
-          const nw = Math.max(40, w0 + (ev.clientX - startX));
-          const nh = Math.max(40, h0 + (ev.clientY - startY));
+          const nw = Math.max(40, w0 + (ev.clientX - startX) / tableZoom);
+          const nh = Math.max(40, h0 + (ev.clientY - startY) / tableZoom);
           div.style.width = nw+'px'; div.style.height = nh+'px';
         };
         const onUp = ev => {
@@ -1247,13 +1256,14 @@ function makeDraggable(elm, onEnd) {
   elm.addEventListener('mousedown', e => {
     if (e.target.classList.contains('figurine-resize')) return;
     if (e.button !== 0) return;
+    if (spaceHeld) return; // space+drag pans the viewport instead
     e.preventDefault();
-    const parent = elm.parentElement.getBoundingClientRect();
     const startX = e.clientX, startY = e.clientY;
     const x0 = parseInt(elm.style.left, 10) || 0, y0 = parseInt(elm.style.top, 10) || 0;
     let lastX=x0, lastY=y0;
     const onMove = ev => {
-      lastX = x0 + (ev.clientX - startX); lastY = y0 + (ev.clientY - startY);
+      lastX = x0 + (ev.clientX - startX) / tableZoom;
+      lastY = y0 + (ev.clientY - startY) / tableZoom;
       elm.style.left = lastX+'px'; elm.style.top = lastY+'px';
     };
     const onUp = ev => {
@@ -1317,9 +1327,60 @@ let activeStroke = null;
 function setupTableInteraction() {
   const canvas = $('#drawLayer'); const stage = $('#tableStage');
   if (!stage) return;
-  stage.addEventListener('mousemove', e => {
+
+  // Space = pan mode
+  window.addEventListener('keydown', e => {
+    if (e.key === ' ' && !e.target.matches('input,textarea,select')) {
+      e.preventDefault();
+      spaceHeld = true;
+      stage.style.cursor = 'grab';
+    }
+  });
+  window.addEventListener('keyup', e => {
+    if (e.key === ' ') {
+      spaceHeld = false;
+      isPanning = false;
+      stage.style.cursor = '';
+    }
+  });
+
+  // Pan start
+  stage.addEventListener('mousedown', e => {
+    if (spaceHeld && e.button === 0) {
+      e.preventDefault();
+      isPanning = true;
+      panStartX = e.clientX; panStartY = e.clientY;
+      panOriginX = tablePanX; panOriginY = tablePanY;
+      stage.style.cursor = 'grabbing';
+    }
+  });
+
+  // Wheel zoom (centered on cursor)
+  stage.addEventListener('wheel', e => {
+    e.preventDefault();
+    const factor = e.deltaY > 0 ? 0.9 : 1.1;
+    const newZoom = Math.max(0.2, Math.min(4, tableZoom * factor));
     const r = stage.getBoundingClientRect();
-    const x = e.clientX - r.left, y = e.clientY - r.top;
+    const mx = e.clientX - r.left, my = e.clientY - r.top;
+    tablePanX = mx - (mx - tablePanX) * (newZoom / tableZoom);
+    tablePanY = my - (my - tablePanY) * (newZoom / tableZoom);
+    tableZoom = newZoom;
+    applyTableTransform();
+    const sl = $('#zoomSlider');
+    if (sl) sl.value = String(Math.round(tableZoom * 100) / 100);
+  }, { passive: false });
+
+  stage.addEventListener('mousemove', e => {
+    if (isPanning) {
+      tablePanX = panOriginX + (e.clientX - panStartX);
+      tablePanY = panOriginY + (e.clientY - panStartY);
+      applyTableTransform();
+      return;
+    }
+    // Convert to table space for cursor + drawing
+    const r = stage.getBoundingClientRect();
+    const x = (e.clientX - r.left - tablePanX) / tableZoom;
+    const y = (e.clientY - r.top  - tablePanY) / tableZoom;
     // throttle cursor broadcast
     const now = Date.now();
     if (now - cursorThrottle > 60) {
@@ -1329,33 +1390,42 @@ function setupTableInteraction() {
     }
     // Only extend the stroke while the left mouse button is still held.
     if (activeStroke && (e.buttons & 1)) {
-      activeStroke.points.push([x,y]);
+      activeStroke.points.push([x, y]);
       drawLiveStroke();
     } else if (activeStroke && !(e.buttons & 1)) {
       // Mouse button was released outside the window or the up event was missed.
       finishStroke();
     }
   });
+
   canvas.addEventListener('mousedown', e => {
     if (e.button !== 0) return;
     if (currentTool === 'pen') {
       e.preventDefault();
       const r = canvas.getBoundingClientRect();
-      activeStroke = { color: currentColor, width: currentWidth, points: [[e.clientX-r.left, e.clientY-r.top]] };
+      activeStroke = { color: currentColor, width: currentWidth, points: [[(e.clientX - r.left) / tableZoom, (e.clientY - r.top) / tableZoom]] };
     } else if (currentTool === 'eraser') {
       e.preventDefault();
       const r = canvas.getBoundingClientRect();
-      eraseAt(e.clientX - r.left, e.clientY - r.top);
+      eraseAt((e.clientX - r.left) / tableZoom, (e.clientY - r.top) / tableZoom);
     }
   });
   canvas.addEventListener('mousemove', e => {
     // Continuous-erase: while LMB held in eraser mode, erase strokes under the cursor.
     if (currentTool !== 'eraser' || !(e.buttons & 1)) return;
     const r = canvas.getBoundingClientRect();
-    eraseAt(e.clientX - r.left, e.clientY - r.top);
+    eraseAt((e.clientX - r.left) / tableZoom, (e.clientY - r.top) / tableZoom);
   });
-  window.addEventListener('mouseup', e => { if (e.button === 0) finishStroke(); });
-  window.addEventListener('mouseleave', finishStroke);
+  window.addEventListener('mouseup', e => {
+    if (e.button === 0) {
+      finishStroke();
+      if (isPanning) {
+        isPanning = false;
+        stage.style.cursor = spaceHeld ? 'grab' : '';
+      }
+    }
+  });
+  window.addEventListener('blur', () => { finishStroke(); spaceHeld = false; isPanning = false; });
 }
 
 function finishStroke() {
@@ -1688,6 +1758,18 @@ function setupToolbarUI() {
   const colorI = el('input', { type:'color', value: currentColor });
   colorI.addEventListener('change', e => currentColor = e.target.value);
   tb.appendChild(colorI);
+  // Zoom slider
+  const zoomSlider = el('input', { id:'zoomSlider', type:'range', min:'0.2', max:'4', step:'0.05', value:'1', title:'Zoom (scroll wheel also works)', style:{width:'70px', cursor:'pointer'} });
+  zoomSlider.addEventListener('input', e => {
+    tableZoom = parseFloat(e.target.value);
+    applyTableTransform();
+  });
+  tb.appendChild(zoomSlider);
+  tb.appendChild(el('button', { class:'tool-btn', title:'Reset pan & zoom', onclick: () => {
+    tableZoom = 1; tablePanX = 0; tablePanY = 0;
+    applyTableTransform();
+    zoomSlider.value = '1';
+  }}, '⌖'));
   // Map + Token uploads — available to everyone.
   const mapBtn = el('label', { class:'tool-btn' }, '+ Add Map');
   const mapI = el('input', { type:'file', accept:'image/*', style:{display:'none'}});
