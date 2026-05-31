@@ -1,7 +1,7 @@
 # Deck Quest VTT — Project Brief
 
 > **Last updated:** 2026-06-01  
-> **Latest release:** v0.2.3  
+> **Latest release:** v0.2.3 (main) · v0.3.0-ui (ui-redesign branch)  
 > **GitHub repo:** https://github.com/riegodavid-git/deck-quest-vtt  
 > **Live relay server:** https://deck-quest-vtt.onrender.com  
 > **Official game page:** https://www.garagesofagames.com/games/deck-quest
@@ -309,13 +309,17 @@ These were discussed or naturally follow from current state:
 ## 12. How to Continue in a New Session
 
 1. Read this file first for context.
-2. Open the repo: https://github.com/riegodavid-git/deck-quest-vtt
-3. Key files to read before making changes:
+2. **Branches:**
+   - `main` — stable navy-and-blue UI (v0.2.3)
+   - `ui-redesign` — Stitch-inspired gold/parchment redesign (v0.3.0-ui). Uses base64-embedded fonts from `fonts/`, an `ICONS` SVG set in `shared.js`, and `.stat-medallion` circular HP/AC chips in the player panel header. Same engine, same element IDs, same op routing.
+3. Open the repo: https://github.com/riegodavid-git/deck-quest-vtt
+4. Key files to read before making changes:
    - `templates/shared.js` — the entire game engine
    - `templates/gm.template.html` — GM client CSS and HTML structure
    - `templates/player.template.html` — Player client CSS and HTML structure
-4. After any code change: `node build.js` → test `dist/gm.html` locally → commit → push → `gh release create`
-5. Relay server changes (`relay/server.js`) auto-deploy to Render on push — no manual step needed.
+   - `fonts/` (ui-redesign branch only) — base64-embedded woff2 fonts injected via `%%FONTS_CSS%%`
+5. After any code change: `node build.js` → test `dist/gm.html` locally → commit → push → `gh release create`
+6. Relay server changes (`relay/server.js`) auto-deploy to Render on push — no manual step needed.
 
 ### Quick syntax check before building
 ```bash
@@ -328,6 +332,7 @@ node -e "const fs=require('fs'); try{new Function(fs.readFileSync('templates/sha
 
 | Version | Date | Summary |
 |---|---|---|
+| v0.3.0-ui | 2026-06-01 | UI redesign branch (`ui-redesign`): gold-on-charcoal palette, glass panels, Libre Caslon + Hanken Grotesk + JetBrains Mono base64-embedded fonts, SVG icon set, stat medallions, gold token rings. Functional behavior unchanged. |
 | v0.2.3 | 2026-06-01 | Hotfix: syntax error in context menu broke page load |
 | v0.2.2 | 2026-06-01 | Multi-select (Ctrl+click / lasso), movable panels, token panel position fix |
 | v0.2.1 | 2026-06-01 | D&D token panel: 1924 tokens, 90+ categories, search, click to drop |

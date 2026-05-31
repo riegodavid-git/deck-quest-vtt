@@ -24,6 +24,48 @@ for (const t of TOKENS) TOKENS_BY_ID[t.id] = t;
 // Multi-select — set of instIds currently selected
 const selectionSet = new Set();
 
+// =================== Inline SVG icons ===================
+// Self-contained icon set (no font dependency). Stroke-based, scales to currentColor.
+const ICONS = {
+  pointer:        '<svg viewBox="0 0 24 24"><path d="M5 3 L19 11 L12 13 L9 20 Z"/></svg>',
+  pen:            '<svg viewBox="0 0 24 24"><path d="M16 3 L21 8 L8 21 L3 21 L3 16 Z"/><path d="M13 6 L18 11"/></svg>',
+  eraser:         '<svg viewBox="0 0 24 24"><path d="M20 20 L9 20 L3 14 L13 4 L21 12 Z"/><path d="M9 20 L15 14"/></svg>',
+  target:         '<svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><circle cx="12" cy="12" r="4"/><path d="M12 1 L12 5 M12 19 L12 23 M1 12 L5 12 M19 12 L23 12"/></svg>',
+  deck:           '<svg viewBox="0 0 24 24"><rect x="4" y="3" width="14" height="18" rx="2"/><path d="M7 3 L7 21 M11 3 L11 21"/></svg>',
+  discard:        '<svg viewBox="0 0 24 24"><path d="M4 7 L20 7 M9 7 L9 4 L15 4 L15 7"/><path d="M6 7 L7 21 L17 21 L18 7"/><path d="M10 11 L10 17 M14 11 L14 17"/></svg>',
+  tokens:         '<svg viewBox="0 0 24 24"><circle cx="9" cy="9" r="5"/><circle cx="16" cy="16" r="5"/></svg>',
+  map:            '<svg viewBox="0 0 24 24"><path d="M3 6 L9 4 L15 6 L21 4 L21 18 L15 20 L9 18 L3 20 Z"/><path d="M9 4 L9 18 M15 6 L15 20"/></svg>',
+  search:         '<svg viewBox="0 0 24 24"><circle cx="11" cy="11" r="7"/><path d="M21 21 L16 16"/></svg>',
+  dice:           '<svg viewBox="0 0 24 24"><rect x="3" y="3" width="18" height="18" rx="3"/><circle cx="8" cy="8" r="1.2" fill="currentColor"/><circle cx="16" cy="8" r="1.2" fill="currentColor"/><circle cx="12" cy="12" r="1.2" fill="currentColor"/><circle cx="8" cy="16" r="1.2" fill="currentColor"/><circle cx="16" cy="16" r="1.2" fill="currentColor"/></svg>',
+  close:          '<svg viewBox="0 0 24 24"><path d="M5 5 L19 19 M19 5 L5 19"/></svg>',
+  trash:          '<svg viewBox="0 0 24 24"><path d="M4 7 L20 7 M9 7 L9 4 L15 4 L15 7 M6 7 L7 21 L17 21 L18 7"/></svg>',
+  'chevron-up':    '<svg viewBox="0 0 24 24"><path d="M5 15 L12 8 L19 15"/></svg>',
+  'chevron-down':  '<svg viewBox="0 0 24 24"><path d="M5 9 L12 16 L19 9"/></svg>',
+  'chevron-left':  '<svg viewBox="0 0 24 24"><path d="M15 5 L8 12 L15 19"/></svg>',
+  'chevron-right': '<svg viewBox="0 0 24 24"><path d="M9 5 L16 12 L9 19"/></svg>',
+  plus:           '<svg viewBox="0 0 24 24"><path d="M12 4 L12 20 M4 12 L20 12"/></svg>',
+  save:           '<svg viewBox="0 0 24 24"><path d="M5 3 L17 3 L21 7 L21 21 L5 21 Z"/><path d="M7 3 L7 9 L15 9 L15 3 M7 14 L17 14 L17 21 L7 21 Z"/></svg>',
+  load:           '<svg viewBox="0 0 24 24"><path d="M4 5 L10 5 L12 7 L20 7 L20 19 L4 19 Z"/></svg>',
+  refresh:        '<svg viewBox="0 0 24 24"><path d="M3 12 A9 9 0 0 1 19 6"/><path d="M21 4 L21 9 L16 9"/><path d="M21 12 A9 9 0 0 1 5 18"/><path d="M3 20 L3 15 L8 15"/></svg>',
+};
+
+function icon(name, opts) {
+  const span = document.createElement('span');
+  span.className = 'icon' + (opts && opts.class ? ' ' + opts.class : '');
+  span.innerHTML = ICONS[name] || '';
+  if (opts && opts.title) span.title = opts.title;
+  return span;
+}
+
+// Populate any element with a data-icon attribute by injecting the SVG.
+function paintStaticIcons() {
+  document.querySelectorAll('[data-icon]').forEach(node => {
+    const name = node.getAttribute('data-icon');
+    if (!ICONS[name]) return;
+    node.replaceChildren(icon(name));
+  });
+}
+
 // =================== Utilities ===================
 function $(sel, root) { return (root||document).querySelector(sel); }
 function $$(sel, root) { return Array.from((root||document).querySelectorAll(sel)); }
@@ -643,6 +685,17 @@ function applyOp(op, by) {
       s.table.drawings = s.table.drawings.filter(d => d.id !== op.id);
       break;
     }
+    case 'set-group': {
+      const ids = op.instIds || [];
+      const gid = op.groupId || null;
+      for (const id of ids) {
+        const f = s.table.figurines.find(x => x.instId === id);
+        if (f) { if (gid) f.groupId = gid; else delete f.groupId; }
+        const c = s.table.cards.find(x => x.instId === id);
+        if (c) { if (gid) c.groupId = gid; else delete c.groupId; }
+      }
+      break;
+    }
   }
   broadcast({ type:'state' });
   renderAllGM();
@@ -777,7 +830,7 @@ function renderTableCards() {
   layer.innerHTML = '';
   for (const c of s.table.cards) {
     const card = CARDS_BY_ID[c.cardId];
-    const div = el('div', { class:'placed-card' + (c.locked?' locked':'') + (selectionSet.has(c.instId)?' selected':''), style:{ left:c.x+'px', top:c.y+'px', transform:`rotate(${c.rot||0}deg)`, zIndex:c.z||1 }, 'data-inst-id': c.instId });
+    const div = el('div', { class:'placed-card' + (c.locked?' locked':'') + (selectionSet.has(c.instId)?' selected':'') + (c.groupId?' grouped':''), style:{ left:c.x+'px', top:c.y+'px', transform:`rotate(${c.rot||0}deg)`, zIndex:c.z||1 }, 'data-inst-id': c.instId });
     div.appendChild(el('img', { class:'card-img', src: c.faceUp ? card.image : card.back, draggable:'false' }));
     if (c.locked) div.appendChild(el('div', { class:'figurine-lock-icon', title:'Locked by GM' }, '🔒'));
     if (!c.locked) {
@@ -801,7 +854,7 @@ function renderFigurines() {
       charPlayer = s.hands[f.playerId];
       const pfpHash = charPlayer?.pfpHash;
       url = pfpHash ? ASSETS[pfpHash] : null;
-      ringColor = charPlayer?.color || '#3b82f6';
+      ringColor = charPlayer?.color || '#f2ca50';
     } else {
       // Uploaded assets first; fall back to built-in token library (no transfer needed)
       url = ASSETS[f.assetHash] || TOKENS_BY_ID[f.assetHash]?.image;
@@ -816,7 +869,8 @@ function renderFigurines() {
       + (isChar ? ' character' : '')
       + (eff.sneaking ? ' sneaking' : '')
       + (eff.down ? ' downed' : '')
-      + (selectionSet.has(f.instId) ? ' selected' : '');
+      + (selectionSet.has(f.instId) ? ' selected' : '')
+      + (f.groupId ? ' grouped' : '');
     const style = { left:f.x+'px', top:f.y+'px', width:f.w+'px', height:f.h+'px', transform:tf, zIndex:f.z||1, opacity };
     if (isChar) style.borderColor = ringColor;
     const div = el('div', { class:classes, style, 'data-inst-id': f.instId });
@@ -949,15 +1003,21 @@ function playerPanel(pid, p, isSelfOrEditable) {
   const expanded = expandedPanels.has(pid);
   const panel = el('div', { class:'player-panel' + (expanded?' expanded':'') });
   // header
-  const header = el('div', { class:'player-header', style:{ borderColor: p.color || '#3b82f6' }});
+  const header = el('div', { class:'player-header', style:{ borderColor: p.color || 'var(--accent)' }});
   const pfp = el('div', { class:'pfp' });
   if (p.pfpHash && ASSETS[p.pfpHash]) pfp.style.backgroundImage = 'url('+ASSETS[p.pfpHash]+')';
   header.appendChild(pfp);
   header.appendChild(el('div', { class:'player-name' }, p.name || (pid==='gm'?'GM':pid)));
   if (pid !== 'gm' && p.hp && p.armor) {
     const vitals = el('div', { class:'header-vitals' });
-    vitals.appendChild(el('span', { class:'mini-hp', title:'HP' }, `♥ ${p.hp.current}/${p.hp.max}`));
-    vitals.appendChild(el('span', { class:'mini-armor', title:'Armor' }, `🛡 ${p.armor.current}/${p.armor.max}`));
+    const hpMed = el('div', { class:'stat-medallion hp', title:`HP ${p.hp.current}/${p.hp.max}` });
+    hpMed.appendChild(el('div', { class:'stat-medallion-val' }, String(p.hp.current ?? '—')));
+    hpMed.appendChild(el('div', { class:'stat-medallion-lbl' }, 'HP'));
+    vitals.appendChild(hpMed);
+    const arMed = el('div', { class:'stat-medallion armor', title:`Armor ${p.armor.current}/${p.armor.max}` });
+    arMed.appendChild(el('div', { class:'stat-medallion-val' }, String(p.armor.current ?? '—')));
+    arMed.appendChild(el('div', { class:'stat-medallion-lbl' }, 'AC'));
+    vitals.appendChild(arMed);
     header.appendChild(vitals);
   }
   header.addEventListener('click', () => {
@@ -990,8 +1050,8 @@ function playerPanel(pid, p, isSelfOrEditable) {
   body.appendChild(infoRow);
   // HP / Armor
   const vitalRow = el('div', { class:'row' });
-  vitalRow.appendChild(vitalBar('HP', p.hp, 'hp', '#ef4444', editable, pid));
-  vitalRow.appendChild(vitalBar('Armor', p.armor, 'armor', '#3b82f6', editable, pid));
+  vitalRow.appendChild(vitalBar('HP', p.hp, 'hp', '#ffb4a8', editable, pid));
+  vitalRow.appendChild(vitalBar('Armor', p.armor, 'armor', '#c3cee5', editable, pid));
   body.appendChild(vitalRow);
   // Stats
   const statRow = el('div', { class:'stat-grid' });
@@ -1182,6 +1242,10 @@ function showDeckContextMenu(deckType, e) {
   ], e.clientX, e.clientY);
 }
 function showCardContextMenu(info, e) {
+  // Auto-expand selection to the whole group when right-clicking a grouped item
+  if (info.where === 'table' && info.instId && !selectionSet.has(info.instId)) {
+    if (selectWholeGroup(info.instId)) rerenderAll();
+  }
   const items = [];
   if (info.where === 'table' && selectionSet.size > 1 && selectionSet.has(info.instId)) {
     const n = selectionSet.size;
@@ -1196,7 +1260,30 @@ function showCardContextMenu(info, e) {
       selectionSet.clear();
     }});
     items.push({ label: `✕ Deselect all`, action: () => { selectionSet.clear(); rerenderAll(); }});
+    // Make Group / Ungroup
+    const ids = [...selectionSet];
+    const firstGid = getGroupIdOf(ids[0]);
+    const allSameGroup = firstGid && ids.every(id => getGroupIdOf(id) === firstGid);
+    if (allSameGroup) {
+      items.push({ label: `🔓 Ungroup`, action: () => {
+        sendOp({ type:'set-group', instIds: getGroupMembers(firstGid), groupId: null });
+      }});
+    } else {
+      items.push({ label: `🔗 Make Group`, action: () => {
+        sendOp({ type:'set-group', instIds: ids, groupId: uid() });
+      }});
+    }
     items.push('-');
+  }
+  // Ungroup option for a single right-clicked grouped item
+  if (info.where === 'table' && selectionSet.size <= 1) {
+    const gid = getGroupIdOf(info.instId);
+    if (gid) {
+      items.push({ label: `🔓 Ungroup`, action: () => {
+        sendOp({ type:'set-group', instIds: getGroupMembers(gid), groupId: null });
+      }});
+      items.push('-');
+    }
   }
   items.push(
     { label: info.faceUp ? 'Flip face-down' : 'Flip face-up', action: () => sendOp({ type:'flip-card', where:info.where, owner:info.owner, instId:info.instId }) },
@@ -1243,6 +1330,10 @@ const STATUS_EFFECTS = [
   ['down',      '💀 Down'],
 ];
 function showFigurineContextMenu(f, e) {
+  // Auto-expand selection to the whole group when right-clicking a grouped item
+  if (!selectionSet.has(f.instId)) {
+    if (selectWholeGroup(f.instId)) rerenderAll();
+  }
   const eff = f.effects || {};
   const items = [];
   // Group actions when multiple items are selected
@@ -1266,6 +1357,24 @@ function showFigurineContextMenu(f, e) {
       }
     }});
     items.push({ label: `✕ Deselect all`, action: () => { selectionSet.clear(); rerenderAll(); }});
+    // Make Group / Ungroup
+    const ids = [...selectionSet];
+    const firstGid = getGroupIdOf(ids[0]);
+    const allSameGroup = firstGid && ids.every(id => getGroupIdOf(id) === firstGid);
+    if (allSameGroup) {
+      items.push({ label: `🔓 Ungroup`, action: () => {
+        sendOp({ type:'set-group', instIds: getGroupMembers(firstGid), groupId: null });
+      }});
+    } else {
+      items.push({ label: `🔗 Make Group`, action: () => {
+        sendOp({ type:'set-group', instIds: ids, groupId: uid() });
+      }});
+    }
+    items.push('-');
+  } else if (f.groupId) {
+    items.push({ label: `🔓 Ungroup`, action: () => {
+      sendOp({ type:'set-group', instIds: getGroupMembers(f.groupId), groupId: null });
+    }});
     items.push('-');
   }
   items.push(
@@ -1340,6 +1449,30 @@ function showOpacitySlider(f, x, y) {
   document.body.appendChild(popup);
 }
 
+// =================== Group helpers ===================
+function getGroupIdOf(instId) {
+  const s = activeState(); if (!s) return null;
+  const f = s.table.figurines.find(x => x.instId === instId);
+  if (f && f.groupId) return f.groupId;
+  const c = s.table.cards.find(x => x.instId === instId);
+  if (c && c.groupId) return c.groupId;
+  return null;
+}
+function getGroupMembers(groupId) {
+  const s = activeState(); if (!s || !groupId) return [];
+  const ids = [];
+  for (const f of s.table.figurines) if (f.groupId === groupId) ids.push(f.instId);
+  for (const c of s.table.cards)     if (c.groupId === groupId) ids.push(c.instId);
+  return ids;
+}
+function selectWholeGroup(instId) {
+  const gid = getGroupIdOf(instId);
+  if (!gid) return false;
+  selectionSet.clear();
+  for (const id of getGroupMembers(gid)) selectionSet.add(id);
+  return true;
+}
+
 // =================== Drag helper ===================
 // instId (optional): enables Ctrl+click selection and group drag.
 function makeDraggable(elm, onEnd, instId) {
@@ -1359,8 +1492,11 @@ function makeDraggable(elm, onEnd, instId) {
       return;
     }
 
-    // Regular click on an item not in the selection → clear selection
-    if (instId && !selectionSet.has(instId)) selectionSet.clear();
+    // Grouped item → select the whole group on plain click
+    if (instId && !selectionSet.has(instId)) {
+      if (!selectWholeGroup(instId)) selectionSet.clear();
+      rerenderAll();
+    }
 
     e.preventDefault();
     const startX = e.clientX, startY = e.clientY;
@@ -1872,14 +2008,15 @@ function setupLogToggle() {
   const overlay = $('#logOverlay'); if (!overlay) return;
   const header = el('div', { id:'logHeader' });
   header.appendChild(el('span', {}, 'Log & Dice'));
-  const btn = el('button', { class:'log-toggle', title:'Toggle log' }, '▾');
+  const btn = el('button', { class:'log-toggle', title:'Toggle log' });
+  btn.appendChild(icon('chevron-down'));
   header.appendChild(btn);
   overlay.insertBefore(header, overlay.firstChild);
   let collapsed = false;
   btn.addEventListener('click', () => {
     collapsed = !collapsed;
     overlay.classList.toggle('collapsed', collapsed);
-    btn.textContent = collapsed ? '▴' : '▾';
+    btn.replaceChildren(icon(collapsed ? 'chevron-up' : 'chevron-down'));
   });
 }
 
@@ -2068,10 +2205,13 @@ function openTokenPanel() {
 
 function setupToolbarUI() {
   const tb = $('#toolbar'); if (!tb) return;
+  const TOOL_ICON = { pointer:'pointer', pen:'pen', eraser:'eraser' };
   for (const t of ['pointer','pen','eraser']) {
-    tb.appendChild(el('button', { class:'tool-btn'+(t==='pointer'?' active':''), 'data-tool':t, onclick: () => setTool(t) }, t));
+    const b = el('button', { class:'tool-btn'+(t==='pointer'?' active':''), 'data-tool':t, title:t, onclick: () => setTool(t) });
+    b.appendChild(icon(TOOL_ICON[t]));
+    tb.appendChild(b);
   }
-  const colorI = el('input', { type:'color', value: currentColor });
+  const colorI = el('input', { type:'color', value: currentColor, title:'Pen color', style:{width:'28px',height:'28px',padding:'0',cursor:'pointer'} });
   colorI.addEventListener('change', e => currentColor = e.target.value);
   tb.appendChild(colorI);
   // Zoom slider
@@ -2081,78 +2221,113 @@ function setupToolbarUI() {
     applyTableTransform();
   });
   tb.appendChild(zoomSlider);
-  tb.appendChild(el('button', { class:'tool-btn', title:'Reset pan & zoom', onclick: () => {
+  const resetBtn = el('button', { class:'tool-btn', title:'Reset pan & zoom', onclick: () => {
     tableZoom = 1; tablePanX = 0; tablePanY = 0;
     applyTableTransform();
     zoomSlider.value = '1';
-  }}, '⌖'));
+  }});
+  resetBtn.appendChild(icon('target'));
+  tb.appendChild(resetBtn);
   // Panel toggle buttons
-  tb.appendChild(el('button', { class:'tool-btn', title:'Toggle deck panel', onclick: () => {
-    const p = $('#deckPanel'); if (p) p.style.display = p.style.display === 'none' ? '' : 'none';
-  }}, '📚'));
-  tb.appendChild(el('button', { class:'tool-btn', title:'Toggle discard panel', onclick: () => {
-    const p = $('#discardPanel'); if (p) p.style.display = p.style.display === 'none' ? '' : 'none';
-  }}, '🗑'));
+  const deckTglBtn = el('button', { class:'tool-btn', title:'Toggle deck panel', onclick: () => {
+    const p = $('#deckPanel'), t = $('#deckTab'); if (!p) return;
+    const collapsed = p.classList.toggle('collapsed');
+    if (t) t.style.display = collapsed ? 'block' : 'none';
+  }});
+  deckTglBtn.appendChild(icon('deck'));
+  tb.appendChild(deckTglBtn);
+  const discTglBtn = el('button', { class:'tool-btn', title:'Toggle discard panel', onclick: () => {
+    const p = $('#discardPanel'), t = $('#discardTab'); if (!p) return;
+    const collapsed = p.classList.toggle('collapsed');
+    if (t) t.style.display = collapsed ? 'block' : 'none';
+  }});
+  discTglBtn.appendChild(icon('discard'));
+  tb.appendChild(discTglBtn);
   // Token library panel
-  tb.appendChild(el('button', { class:'tool-btn', title:'Browse & add D&D tokens', onclick: () => openTokenPanel() }, '🎭 Tokens'));
+  const tokenLibBtn = el('button', { class:'tool-btn', title:'Browse & add D&D tokens', onclick: () => openTokenPanel() });
+  tokenLibBtn.appendChild(icon('tokens'));
+  tokenLibBtn.appendChild(el('span', {}, 'Tokens'));
+  tb.appendChild(tokenLibBtn);
   // Map + Token uploads — available to everyone.
-  const mapBtn = el('label', { class:'tool-btn' }, '+ Add Map');
+  const mapBtn = el('label', { class:'tool-btn', title:'Upload a battle map' });
+  mapBtn.appendChild(icon('map'));
+  mapBtn.appendChild(el('span', {}, 'Map'));
   const mapI = el('input', { type:'file', accept:'image/*', style:{display:'none'}});
   mapI.addEventListener('change', e => { uploadFigurine(e.target.files[0], 'map'); mapI.value=''; });
   mapBtn.appendChild(mapI); tb.appendChild(mapBtn);
-  const tokenBtn = el('label', { class:'tool-btn' }, '+ Add Token');
+  const tokenBtn = el('label', { class:'tool-btn', title:'Upload a custom token' });
+  tokenBtn.appendChild(icon('plus'));
+  tokenBtn.appendChild(el('span', {}, 'Token'));
   const tokenI = el('input', { type:'file', accept:'image/*', style:{display:'none'}});
   tokenI.addEventListener('change', e => { uploadFigurine(e.target.files[0], 'figurine'); tokenI.value=''; });
   tokenBtn.appendChild(tokenI); tb.appendChild(tokenBtn);
   if (ROLE === 'gm') {
-    tb.appendChild(el('button', { onclick: () => sendOp({ type:'clear-drawings' }) }, 'Clear drawings'));
-    const searchBtn = el('button', { onclick: () => openSearch() }, 'Search cards');
+    const clrBtn = el('button', { class:'tool-btn', title:'Clear all drawings', onclick: () => sendOp({ type:'clear-drawings' }) });
+    clrBtn.appendChild(icon('eraser'));
+    clrBtn.appendChild(el('span', {}, 'Clear'));
+    tb.appendChild(clrBtn);
+    const searchBtn = el('button', { class:'tool-btn', title:'Search cards', onclick: () => openSearch() });
+    searchBtn.appendChild(icon('search'));
+    searchBtn.appendChild(el('span', {}, 'Search'));
     tb.appendChild(searchBtn);
   } else {
-    tb.appendChild(el('button', { onclick: () => sendOp({ type:'undo-drawing', by: MY_ID }) }, 'Undo my last'));
+    const undoBtn = el('button', { class:'tool-btn', title:'Undo my last stroke', onclick: () => sendOp({ type:'undo-drawing', by: MY_ID }) });
+    undoBtn.appendChild(icon('refresh'));
+    undoBtn.appendChild(el('span', {}, 'Undo'));
+    tb.appendChild(undoBtn);
   }
 }
 
-// =================== Movable / toggleable floating panels ===================
-function makePanelDraggable(panel, handle) {
-  handle.style.cursor = 'grab';
-  handle.addEventListener('mousedown', e => {
-    if (e.button !== 0) return;
-    e.preventDefault(); e.stopPropagation();
-    const stage = $('#tableStage') || panel.offsetParent;
-    const sr = stage.getBoundingClientRect();
-    const pr = panel.getBoundingClientRect();
-    const x0 = pr.left - sr.left, y0 = pr.top - sr.top;
-    // Freeze right-based positioning before dragging
-    panel.style.right = 'auto';
-    panel.style.left = x0 + 'px';
-    panel.style.top  = y0 + 'px';
-    const startX = e.clientX, startY = e.clientY;
-    handle.style.cursor = 'grabbing';
-    const onMove = ev => {
-      panel.style.left = (x0 + ev.clientX - startX) + 'px';
-      panel.style.top  = (y0 + ev.clientY - startY) + 'px';
-    };
-    const onUp = () => {
-      window.removeEventListener('mousemove', onMove);
-      window.removeEventListener('mouseup', onUp);
-      handle.style.cursor = 'grab';
-    };
-    window.addEventListener('mousemove', onMove);
-    window.addEventListener('mouseup', onUp);
+// =================== Slide-toggle floating panels ===================
+function setupSlidePanel(panelId, tabId) {
+  const panel = $('#' + panelId);
+  const tab   = $('#' + tabId);
+  if (!panel || !tab) return;
+  const hideBtn = panel.querySelector('.panel-hide-btn');
+  const collapse = () => { panel.classList.add('collapsed'); tab.style.display = 'block'; };
+  const expand   = () => { panel.classList.remove('collapsed'); tab.style.display = 'none'; };
+  if (hideBtn) hideBtn.addEventListener('click', collapse);
+  tab.addEventListener('click', expand);
+}
+
+function setupRailToggle() {
+  const rail = $('#rightRail');
+  const tab  = $('#railTab');
+  if (!rail || !tab) return;
+  let collapsed = false;
+  const update = () => {
+    rail.classList.toggle('collapsed', collapsed);
+    tab.replaceChildren(icon(collapsed ? 'chevron-left' : 'chevron-right'));
+    tab.style.right = collapsed ? '0px' : '340px';
+    tab.title = collapsed ? 'Show players panel' : 'Hide players panel';
+  };
+  tab.addEventListener('click', () => { collapsed = !collapsed; update(); });
+  update();
+}
+
+function setupToolbarToggle() {
+  const toolbar = $('#toolbar');
+  const tab     = $('#toolbarTab');
+  if (!toolbar || !tab) return;
+  const hideBtn = el('button', { class:'tool-btn', title:'Hide toolbar' });
+  hideBtn.appendChild(icon('chevron-up'));
+  hideBtn.addEventListener('click', () => {
+    toolbar.classList.add('collapsed');
+    tab.style.display = 'block';
+  });
+  toolbar.appendChild(hideBtn);
+  tab.addEventListener('click', () => {
+    toolbar.classList.remove('collapsed');
+    tab.style.display = 'none';
   });
 }
 
 function setupFloatingPanels() {
-  for (const id of ['deckPanel', 'discardPanel']) {
-    const panel  = $('#' + id);
-    const handle = panel?.querySelector('.panel-handle');
-    if (!panel || !handle) continue;
-    makePanelDraggable(panel, handle);
-    // Hide button
-    const hideBtn = handle.querySelector('.panel-hide-btn');
-    if (hideBtn) hideBtn.addEventListener('click', () => { panel.style.display = 'none'; });
-  }
+  paintStaticIcons();
+  setupSlidePanel('deckPanel', 'deckTab');
+  setupSlidePanel('discardPanel', 'discardTab');
+  setupRailToggle();
+  setupToolbarToggle();
   // Make log overlay draggable from its header
   const logOverlay = $('#logOverlay');
   const logHeader  = $('#logHeader');
