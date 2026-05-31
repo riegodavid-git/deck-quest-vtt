@@ -1,4 +1,7 @@
 Deck Quest – Game Overview
+
+**Official game page & card art source:** https://www.garagesofagames.com/games/deck-quest
+
 1. What is Deck Quest?
 Deck Quest is a tabletop role-playing game (RPG) designed to be open-ended, flexible, and highly adaptable. Unlike rigid systems, it thrives on creativity and player-driven storytelling.
 

@@ -1,6 +1,6 @@
 # Deck Quest VTT
 
-A virtual tabletop for [Deck Quest](About%20Deck%20Quest.md), an open-ended card-based tabletop RPG. Two standalone HTML files (one for the GM, one for players) sync over peer-to-peer WebRTC so a group can play remotely without any server.
+A virtual tabletop for [Deck Quest](https://www.garagesofagames.com/games/deck-quest), an open-ended card-based tabletop RPG (see also [About Deck Quest.md](About%20Deck%20Quest.md)). Two standalone HTML files (one for the GM, one for players) sync over peer-to-peer WebRTC so a group can play remotely without any server.
 
 ## Download & Play
 
@@ -54,4 +54,4 @@ To ship a new version: edit a template, run `node build.js`, attach the two `dis
 
 ## License
 
-Card art and game content © Deck Quest authors (see [About Deck Quest.md](About%20Deck%20Quest.md)). VTT code is MIT.
+Card art and game content © Deck Quest / [Garages of a Games](https://www.garagesofagames.com/games/deck-quest) (see [About Deck Quest.md](About%20Deck%20Quest.md)). VTT code is MIT.
