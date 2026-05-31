@@ -22,8 +22,21 @@ input:focus, select:focus { outline:1px solid var(--accent); }
 
 #main { display:flex; height: calc(100vh - 48px); }
 #tableStage { flex:1; position:relative; background: radial-gradient(circle at center, #143258 0%, #0a1929 100%); overflow:hidden; }
-#deckStacks { position:absolute; top:60px; left:20px; display:flex; gap:10px; flex-direction:column; z-index:5; }
-#discardStacks { position:absolute; top:60px; right:20px; display:flex; gap:10px; flex-direction:column; z-index:5; }
+/* Floating panels (deck / discard) */
+.float-panel { position:absolute; z-index:10; }
+#deckPanel    { top:60px; left:20px; }
+#discardPanel { top:60px; right:20px; }
+.panel-handle { display:flex; align-items:center; gap:4px; padding:3px 8px; background:rgba(0,0,0,.75); border:1px solid var(--line); border-bottom:none; border-radius:4px 4px 0 0; cursor:grab; user-select:none; }
+.panel-handle:active { cursor:grabbing; }
+.panel-handle > span { font-size:10px; color:var(--muted); flex:1; }
+.panel-hide-btn { background:none; border:none; color:var(--muted); font-size:14px; line-height:1; cursor:pointer; padding:0 3px; }
+.panel-hide-btn:hover { color:var(--text); background:none; border:none; }
+#deckStacks    { display:flex; gap:10px; flex-direction:column; }
+#discardStacks { display:flex; gap:10px; flex-direction:column; }
+/* Selection */
+.figurine.selected   { outline:2px solid #60a5fa !important; outline-offset:2px; }
+.placed-card.selected{ outline:2px solid #60a5fa !important; outline-offset:2px; border-radius:5px; }
+.select-rect { position:absolute; border:1.5px dashed #60a5fa; background:rgba(59,130,246,.08); pointer-events:none; z-index:999990; }
 .deck-stack { width:100px; background:var(--panel); border:1px solid var(--line); border-radius:6px; padding:4px; cursor:pointer; transition: transform .1s; }
 .deck-stack:hover { transform: translateY(-2px); border-color: var(--accent); }
 .deck-stack.discard { opacity:.8; cursor:default; }
@@ -146,7 +159,7 @@ input:focus, select:focus { outline:1px solid var(--accent); }
 .sr-actions button { padding:2px 6px; font-size:10px; }
 
 /* ── Token panel ── */
-.token-panel { position:fixed; inset:0; background:rgba(0,0,0,.75); z-index:3001; display:flex; align-items:flex-start; justify-content:center; padding-top:40px; }
+.token-panel { position:fixed; inset:0; background:rgba(0,0,0,.75); z-index:3001; display:flex; align-items:flex-start; justify-content:center; padding-top:90px; }
 .token-box { background:var(--panel); border:1px solid var(--accent); border-radius:8px; width:860px; max-width:95vw; max-height:82vh; display:flex; flex-direction:column; }
 .token-header { display:flex; align-items:center; gap:8px; padding:10px 14px; background:#000; border-bottom:1px solid var(--line); border-radius:8px 8px 0 0; flex-shrink:0; }
 .token-header > span { font-weight:600; font-size:14px; white-space:nowrap; }
@@ -183,8 +196,14 @@ input:focus, select:focus { outline:1px solid var(--accent); }
 <div id="main">
   <div id="tableStage">
     <div id="toolbar"></div>
-    <div id="deckStacks"></div>
-    <div id="discardStacks"></div>
+    <div id="deckPanel" class="float-panel">
+      <div class="panel-handle" id="deckHandle"><span>📚 Decks</span><button class="panel-hide-btn" title="Hide">—</button></div>
+      <div id="deckStacks"></div>
+    </div>
+    <div id="discardPanel" class="float-panel">
+      <div class="panel-handle" id="discardHandle"><span>🗑 Discards</span><button class="panel-hide-btn" title="Hide">—</button></div>
+      <div id="discardStacks"></div>
+    </div>
     <div id="tableContent">
       <div id="figurineLayer"></div>
       <div id="cardLayer"></div>

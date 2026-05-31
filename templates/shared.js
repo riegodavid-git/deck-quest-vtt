@@ -21,6 +21,9 @@ for (const c of CARDS) { CARDS_BY_ID[c.id] = c; CARDS_BY_TYPE[c.type].push(c); }
 const TOKENS_BY_ID = {};
 for (const t of TOKENS) TOKENS_BY_ID[t.id] = t;
 
+// Multi-select — set of instIds currently selected
+const selectionSet = new Set();
+
 // =================== Utilities ===================
 function $(sel, root) { return (root||document).querySelector(sel); }
 function $$(sel, root) { return Array.from((root||document).querySelectorAll(sel)); }
@@ -774,11 +777,11 @@ function renderTableCards() {
   layer.innerHTML = '';
   for (const c of s.table.cards) {
     const card = CARDS_BY_ID[c.cardId];
-    const div = el('div', { class:'placed-card' + (c.locked?' locked':''), style:{ left:c.x+'px', top:c.y+'px', transform:`rotate(${c.rot||0}deg)`, zIndex:c.z||1 } });
+    const div = el('div', { class:'placed-card' + (c.locked?' locked':'') + (selectionSet.has(c.instId)?' selected':''), style:{ left:c.x+'px', top:c.y+'px', transform:`rotate(${c.rot||0}deg)`, zIndex:c.z||1 }, 'data-inst-id': c.instId });
     div.appendChild(el('img', { class:'card-img', src: c.faceUp ? card.image : card.back, draggable:'false' }));
     if (c.locked) div.appendChild(el('div', { class:'figurine-lock-icon', title:'Locked by GM' }, '🔒'));
     if (!c.locked) {
-      makeDraggable(div, (x,y) => sendOp({ type:'move-table-card', instId:c.instId, x, y }));
+      makeDraggable(div, (x,y) => sendOp({ type:'move-table-card', instId:c.instId, x, y }), c.instId);
     }
     div.addEventListener('contextmenu', e => {
       e.preventDefault();
@@ -812,10 +815,11 @@ function renderFigurines() {
       + (f.locked ? ' locked' : '')
       + (isChar ? ' character' : '')
       + (eff.sneaking ? ' sneaking' : '')
-      + (eff.down ? ' downed' : '');
+      + (eff.down ? ' downed' : '')
+      + (selectionSet.has(f.instId) ? ' selected' : '');
     const style = { left:f.x+'px', top:f.y+'px', width:f.w+'px', height:f.h+'px', transform:tf, zIndex:f.z||1, opacity };
     if (isChar) style.borderColor = ringColor;
-    const div = el('div', { class:classes, style });
+    const div = el('div', { class:classes, style, 'data-inst-id': f.instId });
     if (url) div.appendChild(el('img', { class:'figurine-img', src:url, draggable:'false' }));
     else div.appendChild(el('div', { class:'figurine-loading' }, isChar ? (charPlayer?.name || '?') : 'Loading...'));
     if (isChar) {
@@ -841,7 +845,7 @@ function renderFigurines() {
     }
     if (f.locked) div.appendChild(el('div', { class:'figurine-lock-icon', title:'Locked' }, '🔒'));
     if (!f.locked) {
-      makeDraggable(div, (x,y) => sendOp({ type:'move-figurine', instId:f.instId, x, y }));
+      makeDraggable(div, (x,y) => sendOp({ type:'move-figurine', instId:f.instId, x, y }), f.instId);
       // resize handle
       const handle = el('div', { class:'figurine-resize' });
       handle.addEventListener('mousedown', e => {
@@ -1178,9 +1182,25 @@ function showDeckContextMenu(deckType, e) {
   ], e.clientX, e.clientY);
 }
 function showCardContextMenu(info, e) {
-  const items = [
+  const items = [];
+  if (info.where === 'table' && selectionSet.size > 1 && selectionSet.has(info.instId)) {
+    const n = selectionSet.size;
+    items.push({ label: `${n} items selected`, disabled: true });
+    items.push({ label: `🗑 Discard all ${n}`, action: () => {
+      if (!confirm(`Discard ${n} selected items?`)) return;
+      const s = activeState();
+      for (const id of [...selectionSet]) {
+        if (s.table.cards.find(x => x.instId === id)) sendOp({ type:'transfer-card', from:{where:'table',instId:id}, to:{where:'discard'} });
+        else if (s.table.figurines.find(x => x.instId === id)) sendOp({ type:'remove-figurine', instId:id });
+      }
+      selectionSet.clear();
+    }});
+    items.push({ label: `✕ Deselect all`, action: () => { selectionSet.clear(); rerenderAll(); }});
+    items.push('-');
+  }
+  items.push(
     { label: info.faceUp ? 'Flip face-down' : 'Flip face-up', action: () => sendOp({ type:'flip-card', where:info.where, owner:info.owner, instId:info.instId }) },
-  ];
+  );
   if (info.where === 'table' && ROLE === 'gm') {
     items.push({ label: info.locked ? '🔓 Unlock (allow players to move)' : '🔒 Lock (only GM can move)',
       action: () => sendOp({ type:'lock-table-card', instId: info.instId }) });
@@ -1224,8 +1244,32 @@ const STATUS_EFFECTS = [
 ];
 function showFigurineContextMenu(f, e) {
   const eff = f.effects || {};
-  const items = [
-    { label: f.locked ? '🔓 Unlock' : '🔒 Lock', action: () => sendOp({ type:'move-figurine', instId:f.instId, locked: !f.locked }) },
+  const items = [];
+  // Group actions when multiple items are selected
+  if (selectionSet.size > 1 && selectionSet.has(f.instId)) {
+    const n = selectionSet.size;
+    items.push({ label: `${n} items selected`, disabled: true });
+    items.push({ label: `🗑 Delete all ${n}`, action: () => {
+      if (!confirm(`Delete ${n} selected items?`)) return;
+      const s = activeState();
+      for (const id of [...selectionSet]) {
+        if (s.table.figurines.find(x => x.instId === id)) sendOp({ type:'remove-figurine', instId:id });
+        else if (s.table.cards.find(x => x.instId === id)) sendOp({ type:'transfer-card', from:{where:'table',instId:id}, to:{where:'discard'} });
+      }
+      selectionSet.clear();
+    }});
+    items.push({ label: `🔒 Toggle lock all ${n}`, action: () => {
+      const s = activeState();
+      for (const id of selectionSet) {
+        const fig = s.table.figurines.find(x => x.instId === id);
+        if (fig) sendOp({ type:'move-figurine', instId:id, locked:!fig.locked });
+      }
+    }});
+    items.push({ label: `✕ Deselect all`, action: () => { selectionSet.clear(); rerenderAll(); }});
+    items.push('-');
+  }
+  items.push(
+    { label: f.locked ? '🔓 Unlock' : '🔒 Lock', action: () => sendOp({ type:'move-figurine', instId:f.instId, locked:!f.locked }) },
     { label:'Rename / Label...', action: () => {
         const v = prompt('Label (blank to clear):', f.label || '');
         if (v != null) sendOp({ type:'set-figurine-label', instId:f.instId, label: v });
@@ -1297,25 +1341,73 @@ function showOpacitySlider(f, x, y) {
 }
 
 // =================== Drag helper ===================
-function makeDraggable(elm, onEnd) {
+// instId (optional): enables Ctrl+click selection and group drag.
+function makeDraggable(elm, onEnd, instId) {
   elm.style.cursor = 'move';
   elm.addEventListener('mousedown', e => {
     if (e.target.classList.contains('figurine-resize')) return;
     if (e.button !== 0) return;
-    if (spaceHeld) return; // space+drag pans the viewport instead
+    if (spaceHeld) return;
+
+    // Ctrl/Cmd+click → toggle this item in the selection set
+    if (e.ctrlKey || e.metaKey) {
+      e.preventDefault(); e.stopPropagation();
+      if (instId) {
+        selectionSet.has(instId) ? selectionSet.delete(instId) : selectionSet.add(instId);
+        rerenderAll();
+      }
+      return;
+    }
+
+    // Regular click on an item not in the selection → clear selection
+    if (instId && !selectionSet.has(instId)) selectionSet.clear();
+
     e.preventDefault();
     const startX = e.clientX, startY = e.clientY;
-    const x0 = parseInt(elm.style.left, 10) || 0, y0 = parseInt(elm.style.top, 10) || 0;
-    let lastX=x0, lastY=y0;
+    const x0 = parseInt(elm.style.left, 10) || 0;
+    const y0 = parseInt(elm.style.top,  10) || 0;
+    let lastX = x0, lastY = y0;
+
+    // Capture all other selected items for group drag
+    const groupMembers = [];
+    if (instId && selectionSet.size > 1 && selectionSet.has(instId)) {
+      const s = activeState();
+      if (s) {
+        for (const sid of selectionSet) {
+          if (sid === instId) continue;
+          const f = s.table.figurines.find(f => f.instId === sid);
+          const c = s.table.cards.find(c => c.instId === sid);
+          if (f && !f.locked) groupMembers.push({ instId: sid, x0: f.x, y0: f.y, kind: 'figurine' });
+          else if (c && !c.locked) groupMembers.push({ instId: sid, x0: c.x, y0: c.y, kind: 'card' });
+        }
+      }
+    }
+
     const onMove = ev => {
-      lastX = x0 + (ev.clientX - startX) / tableZoom;
-      lastY = y0 + (ev.clientY - startY) / tableZoom;
-      elm.style.left = lastX+'px'; elm.style.top = lastY+'px';
+      const dx = (ev.clientX - startX) / tableZoom;
+      const dy = (ev.clientY - startY) / tableZoom;
+      lastX = x0 + dx; lastY = y0 + dy;
+      elm.style.left = lastX + 'px'; elm.style.top = lastY + 'px';
+      // Move group members visually in real-time
+      for (const g of groupMembers) {
+        const el = document.querySelector(`[data-inst-id="${g.instId}"]`);
+        if (el) { el.style.left = (g.x0 + dx) + 'px'; el.style.top = (g.y0 + dy) + 'px'; }
+      }
     };
-    const onUp = ev => {
+    const onUp = () => {
       window.removeEventListener('mousemove', onMove);
       window.removeEventListener('mouseup', onUp);
       onEnd(lastX, lastY);
+      // Send ops for group members
+      if (groupMembers.length) {
+        const dx = lastX - x0, dy = lastY - y0;
+        for (const g of groupMembers) {
+          if (g.kind === 'figurine')
+            sendOp({ type: 'move-figurine', instId: g.instId, x: Math.round(g.x0 + dx), y: Math.round(g.y0 + dy) });
+          else
+            sendOp({ type: 'move-table-card', instId: g.instId, x: Math.round(g.x0 + dx), y: Math.round(g.y0 + dy) });
+        }
+      }
     };
     window.addEventListener('mousemove', onMove);
     window.addEventListener('mouseup', onUp);
@@ -1472,6 +1564,55 @@ function setupTableInteraction() {
     }
   });
   window.addEventListener('blur', () => { finishStroke(); spaceHeld = false; isPanning = false; });
+
+  // Escape = clear selection
+  window.addEventListener('keydown', e => {
+    if (e.key === 'Escape') { selectionSet.clear(); $$('.ctx-menu').forEach(m => m.remove()); rerenderAll(); }
+  });
+
+  // Lasso-select: drag on empty table area to rubber-band select figurines/cards
+  const tableContent = $('#tableContent');
+  if (tableContent) {
+    tableContent.addEventListener('mousedown', e => {
+      if (e.button !== 0 || spaceHeld || currentTool !== 'pointer') return;
+      if (e.target.closest('.figurine,.placed-card,.deck-stack')) return;
+      if (!e.ctrlKey && !e.metaKey) selectionSet.clear();
+      const cr = tableContent.getBoundingClientRect();
+      const sx = (e.clientX - cr.left) / tableZoom;
+      const sy = (e.clientY - cr.top)  / tableZoom;
+      const rectEl = document.createElement('div');
+      rectEl.className = 'select-rect';
+      tableContent.appendChild(rectEl);
+      const onMove = ev => {
+        const cx = (ev.clientX - cr.left) / tableZoom, cy = (ev.clientY - cr.top) / tableZoom;
+        const x = Math.min(sx,cx), y = Math.min(sy,cy);
+        rectEl.style.cssText = `left:${x}px;top:${y}px;width:${Math.abs(cx-sx)}px;height:${Math.abs(cy-sy)}px;`;
+      };
+      const onUp = ev => {
+        window.removeEventListener('mousemove', onMove);
+        window.removeEventListener('mouseup', onUp);
+        rectEl.remove();
+        const cx = (ev.clientX - cr.left) / tableZoom, cy = (ev.clientY - cr.top) / tableZoom;
+        const selX = Math.min(sx,cx), selY = Math.min(sy,cy);
+        const selW = Math.abs(cx-sx),  selH = Math.abs(cy-sy);
+        if (selW < 5 || selH < 5) { rerenderAll(); return; }
+        const s = activeState(); if (!s) return;
+        for (const f of s.table.figurines) {
+          if (f.locked && ROLE !== 'gm') continue;
+          if (f.x < selX+selW && f.x+f.w > selX && f.y < selY+selH && f.y+f.h > selY)
+            selectionSet.add(f.instId);
+        }
+        for (const c of s.table.cards) {
+          if (c.locked && ROLE !== 'gm') continue;
+          if (c.x < selX+selW && c.x+140 > selX && c.y < selY+selH && c.y+196 > selY)
+            selectionSet.add(c.instId);
+        }
+        rerenderAll();
+      };
+      window.addEventListener('mousemove', onMove);
+      window.addEventListener('mouseup', onUp);
+    });
+  }
 }
 
 function finishStroke() {
@@ -1686,6 +1827,7 @@ async function boot() {
   setupDiceUI();
   setupToolbarUI();
   setupTableInteraction();
+  setupFloatingPanels();
   setupAltPreview();
   setupLogToggle();
   if (ROLE === 'gm') gmSetupFlow();
@@ -1944,6 +2086,13 @@ function setupToolbarUI() {
     applyTableTransform();
     zoomSlider.value = '1';
   }}, '⌖'));
+  // Panel toggle buttons
+  tb.appendChild(el('button', { class:'tool-btn', title:'Toggle deck panel', onclick: () => {
+    const p = $('#deckPanel'); if (p) p.style.display = p.style.display === 'none' ? '' : 'none';
+  }}, '📚'));
+  tb.appendChild(el('button', { class:'tool-btn', title:'Toggle discard panel', onclick: () => {
+    const p = $('#discardPanel'); if (p) p.style.display = p.style.display === 'none' ? '' : 'none';
+  }}, '🗑'));
   // Token library panel
   tb.appendChild(el('button', { class:'tool-btn', title:'Browse & add D&D tokens', onclick: () => openTokenPanel() }, '🎭 Tokens'));
   // Map + Token uploads — available to everyone.
@@ -1961,6 +2110,74 @@ function setupToolbarUI() {
     tb.appendChild(searchBtn);
   } else {
     tb.appendChild(el('button', { onclick: () => sendOp({ type:'undo-drawing', by: MY_ID }) }, 'Undo my last'));
+  }
+}
+
+// =================== Movable / toggleable floating panels ===================
+function makePanelDraggable(panel, handle) {
+  handle.style.cursor = 'grab';
+  handle.addEventListener('mousedown', e => {
+    if (e.button !== 0) return;
+    e.preventDefault(); e.stopPropagation();
+    const stage = $('#tableStage') || panel.offsetParent;
+    const sr = stage.getBoundingClientRect();
+    const pr = panel.getBoundingClientRect();
+    const x0 = pr.left - sr.left, y0 = pr.top - sr.top;
+    // Freeze right-based positioning before dragging
+    panel.style.right = 'auto';
+    panel.style.left = x0 + 'px';
+    panel.style.top  = y0 + 'px';
+    const startX = e.clientX, startY = e.clientY;
+    handle.style.cursor = 'grabbing';
+    const onMove = ev => {
+      panel.style.left = (x0 + ev.clientX - startX) + 'px';
+      panel.style.top  = (y0 + ev.clientY - startY) + 'px';
+    };
+    const onUp = () => {
+      window.removeEventListener('mousemove', onMove);
+      window.removeEventListener('mouseup', onUp);
+      handle.style.cursor = 'grab';
+    };
+    window.addEventListener('mousemove', onMove);
+    window.addEventListener('mouseup', onUp);
+  });
+}
+
+function setupFloatingPanels() {
+  for (const id of ['deckPanel', 'discardPanel']) {
+    const panel  = $('#' + id);
+    const handle = panel?.querySelector('.panel-handle');
+    if (!panel || !handle) continue;
+    makePanelDraggable(panel, handle);
+    // Hide button
+    const hideBtn = handle.querySelector('.panel-hide-btn');
+    if (hideBtn) hideBtn.addEventListener('click', () => { panel.style.display = 'none'; });
+  }
+  // Make log overlay draggable from its header
+  const logOverlay = $('#logOverlay');
+  const logHeader  = $('#logHeader');
+  if (logOverlay && logHeader) {
+    logHeader.style.cursor = 'grab';
+    logHeader.addEventListener('mousedown', e => {
+      if (e.button !== 0 || e.target.closest('button')) return;
+      e.preventDefault();
+      const r = logOverlay.getBoundingClientRect();
+      const startX = e.clientX - r.left, startY = e.clientY - r.top;
+      logHeader.style.cursor = 'grabbing';
+      const onMove = ev => {
+        logOverlay.style.left   = (ev.clientX - startX) + 'px';
+        logOverlay.style.top    = (ev.clientY - startY) + 'px';
+        logOverlay.style.bottom = 'auto';
+        logOverlay.style.right  = 'auto';
+      };
+      const onUp = () => {
+        window.removeEventListener('mousemove', onMove);
+        window.removeEventListener('mouseup', onUp);
+        logHeader.style.cursor = 'grab';
+      };
+      window.addEventListener('mousemove', onMove);
+      window.addEventListener('mouseup', onUp);
+    });
   }
 }
 
