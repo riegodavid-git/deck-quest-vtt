@@ -1317,7 +1317,7 @@ function showFigurineContextMenu(f, e) {
     { label:'Reset all transforms', action: () => sendOp({ type:'move-figurine', instId:f.instId, rot:0, opacity:1, flipH:false, flipV:false, locked:false }) },
     '-',
     { label:'🗑 Delete', action: () => { if (confirm('Delete this image?')) sendOp({ type:'remove-figurine', instId:f.instId }); } },
-  ];
+  );
   showMenu(items, e.clientX, e.clientY);
 }
 
