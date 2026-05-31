@@ -249,20 +249,10 @@ button .icon + span, button span + .icon { margin-left:6px; }
 #chatOverlay.collapsed { height:auto; }
 #chatOverlay.collapsed #chatMessages, #chatOverlay.collapsed #chatInput { display:none; }
 
-#musicOverlay { position:fixed; bottom:16px; left:748px; width:300px; background:var(--glass-bg); backdrop-filter:var(--glass-blur); -webkit-backdrop-filter:var(--glass-blur); border:1px solid var(--line-strong); border-radius:var(--radius-lg); display:flex; flex-direction:column; z-index:100; box-shadow:0 8px 28px rgba(0,0,0,.6); overflow:hidden; }
-#musicHeader { display:flex; justify-content:space-between; align-items:center; padding:8px 12px; background:rgba(0,0,0,.55); border-bottom:1px solid var(--line); font:600 10px/1 var(--font-display); color:var(--parchment); text-transform:uppercase; letter-spacing:.18em; }
-#musicBody { padding:10px 12px; display:flex; flex-direction:column; gap:8px; }
-#musicOverlay.collapsed #musicBody { display:none; }
-#musicNowPlaying { font:600 13px/1.3 var(--font-display); color:var(--accent); white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
-.music-controls { display:flex; align-items:center; justify-content:center; gap:10px; }
-.music-controls button { width:36px; height:36px; border-radius:50%; display:flex; align-items:center; justify-content:center; padding:0; }
-.music-play-btn { width:44px !important; height:44px !important; background:var(--accent) !important; border-color:var(--accent) !important; color:#1a1612 !important; }
-.music-volume { display:flex; align-items:center; gap:8px; font:500 10px/1 var(--font-mono); color:var(--muted); }
-.music-volume input[type=range] { flex:1; accent-color:var(--accent); height:4px; cursor:pointer; }
-#musicUrlRow { display:flex; gap:6px; }
-#musicUrlRow input { flex:1; font:400 11px/1.4 var(--font-mono); padding:4px 8px; }
-#musicUrlRow button { padding:4px 10px; font-size:11px; }
-#ytPlayer { display:none; }
+/* Remove number input spinners */
+input[type=number]::-webkit-inner-spin-button,
+input[type=number]::-webkit-outer-spin-button { -webkit-appearance:none; margin:0; }
+input[type=number] { -moz-appearance:textfield; }
 
 .token-detail-popup { position:fixed; background:var(--glass-bg); backdrop-filter:var(--glass-blur); -webkit-backdrop-filter:var(--glass-blur); border:1px solid var(--line-strong); border-radius:var(--radius-lg); padding:14px 16px; z-index:2147483645; min-width:200px; box-shadow:0 8px 28px rgba(0,0,0,.7); display:flex; flex-direction:column; gap:10px; }
 .token-detail-popup h4 { margin:0; font:700 14px/1 var(--font-display); color:var(--accent); letter-spacing:.04em; }
@@ -288,16 +278,6 @@ button .icon + span, button span + .icon { margin-left:6px; }
 <div id="main">
   <div id="tableStage">
     <div id="toolbar"></div>
-    <div id="deckPanel" class="float-panel">
-      <div class="panel-handle" id="deckHandle"><span>Decks</span><button class="panel-hide-btn" data-icon="chevron-left" title="Hide"></button></div>
-      <div id="deckStacks"></div>
-    </div>
-    <div id="discardPanel" class="float-panel">
-      <div class="panel-handle" id="discardHandle"><span>Discards</span><button class="panel-hide-btn" data-icon="chevron-right" title="Hide"></button></div>
-      <div id="discardStacks"></div>
-    </div>
-    <div id="deckTab" class="panel-tab" data-icon="chevron-right" title="Show decks"></div>
-    <div id="discardTab" class="panel-tab" data-icon="chevron-left" title="Show discards"></div>
     <div id="toolbarTab" class="panel-tab" data-icon="chevron-down" title="Show toolbar"></div>
     <div id="tableContent">
       <div id="figurineLayer"></div>
@@ -324,26 +304,6 @@ button .icon + span, button span + .icon { margin-left:6px; }
     <button id="chatSendBtn">Send</button>
   </div>
 </div>
-<div id="musicOverlay">
-  <div id="musicHeader">
-    <span>Music</span>
-    <button class="log-toggle" id="musicToggle" title="Toggle music player"></button>
-  </div>
-  <div id="musicBody">
-    <div id="musicNowPlaying">No track loaded</div>
-    <div class="music-controls">
-      <button class="tool-btn" id="musicPrevBtn" title="Restart"></button>
-      <button class="tool-btn music-play-btn" id="musicPlayBtn" title="Play / Pause"></button>
-      <button class="tool-btn" id="musicStopBtn" title="Stop"></button>
-    </div>
-    <div class="music-volume">
-      <span>Vol</span>
-      <input type="range" id="musicVolume" min="0" max="100" value="70">
-      <span id="musicVolLabel">70%</span>
-    </div>
-  </div>
-</div>
-<div id="ytPlayer"></div>
 <script type="application/json" id="_cards_data">%%CARDS_JSON%%</script>
 <script type="application/json" id="_tokens_data">%%TOKENS_JSON%%</script>
 <script>

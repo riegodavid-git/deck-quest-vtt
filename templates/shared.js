@@ -121,7 +121,6 @@ function migrateState(state) {
     state.hands.gm.hand = [];
   }
   if (!state.chat) state.chat = [];
-  if (!state.music) state.music = { videoId: null, title: 'No track loaded', playing: false, currentTime: 0, syncedAt: 0 };
   if (state.gmNotes === undefined) state.gmNotes = '';
 }
 function normalizeZ(state) {
@@ -217,7 +216,6 @@ function newState(playerCount) {
     assetMeta: {},
     log: [],
     chat: [],
-    music: { videoId: null, title: 'No track loaded', playing: false, currentTime: 0, syncedAt: 0 },
     gmNotes: '',
   };
 }
@@ -234,7 +232,6 @@ function viewFor(playerId) {
     assetMeta: s.assetMeta,
     log: s.log,
     chat: s.chat || [],
-    music: s.music || {},
   }));
   for (const [pid, p] of Object.entries(s.hands)) {
     if (pid === 'gm') continue; // never send GM hand to players
@@ -485,12 +482,11 @@ function handleFromPlayer(conn, data) {
 function handleFromGM(data) {
   if (['asset-begin','asset-chunk','asset-end'].includes(data.type)) return handleAssetMessage(data, connections.gm);
   if (data.type === 'state') {
-    const prevMusic = LOCAL_VIEW?.music;
+
     LOCAL_VIEW = data.view;
     if (data.myId) MY_ID = data.myId;
     rerenderAll();
     requestMissingAssets(LOCAL_VIEW.assetMeta);
-    syncMusicPlayer(prevMusic, LOCAL_VIEW.music);
     renderChatPanel();
     return;
   }
@@ -744,44 +740,6 @@ function applyOp(op, by) {
       autosave();
       return;
     }
-    case 'music-load': {
-      if (!s.music) s.music = {};
-      const prevMusicLoad = { ...s.music };
-      s.music.videoId = op.videoId;
-      s.music.title   = op.title || op.videoId;
-      s.music.playing = false;
-      s.music.currentTime = 0;
-      s.music.syncedAt = Date.now();
-      if (ROLE === 'gm') syncMusicPlayer(prevMusicLoad, s.music);
-      break;
-    }
-    case 'music-play': {
-      if (!s.music) break;
-      const prevMusicPlay = { ...s.music };
-      s.music.playing     = true;
-      s.music.currentTime = op.currentTime || 0;
-      s.music.syncedAt    = Date.now();
-      if (ROLE === 'gm') syncMusicPlayer(prevMusicPlay, s.music);
-      break;
-    }
-    case 'music-pause': {
-      if (!s.music) break;
-      const prevMusicPause = { ...s.music };
-      s.music.playing     = false;
-      s.music.currentTime = op.currentTime || 0;
-      s.music.syncedAt    = Date.now();
-      if (ROLE === 'gm') syncMusicPlayer(prevMusicPause, s.music);
-      break;
-    }
-    case 'music-stop': {
-      if (!s.music) break;
-      const prevMusicStop = { ...s.music };
-      s.music.playing = false;
-      s.music.currentTime = 0;
-      s.music.syncedAt = Date.now();
-      if (ROLE === 'gm') syncMusicPlayer(prevMusicStop, s.music);
-      break;
-    }
   }
   broadcast({ type:'state' });
   renderAllGM();
@@ -842,10 +800,10 @@ function rerenderAll() {
   });
 }
 function renderAllGM() {
-  renderTopbar(); renderTable(); renderRightRail(); renderLog(); renderChatPanel(); syncMusicPlayerUI();
+  renderTopbar(); renderTable(); renderRightRail(); renderLog(); renderChatPanel();
 }
 function renderAllPlayer() {
-  renderTopbarPlayer(); renderTable(); renderRightRailPlayer(); renderLog(); renderChatPanel(); syncMusicPlayerUI();
+  renderTopbarPlayer(); renderTable(); renderRightRailPlayer(); renderLog(); renderChatPanel();
 }
 
 function renderTopbar() {
@@ -2091,7 +2049,6 @@ async function boot() {
   setupAltPreview();
   setupLogToggle();
   setupChatUI();
-  setupMusicPlayer();
   // Load tokens in background so placed tokens render after session restore
   ensureTokens().then(() => { if (activeState()) renderTable(); });
   if (ROLE === 'gm') gmSetupFlow();
@@ -2516,171 +2473,6 @@ function renderChatPanel() {
     container.appendChild(row);
   }
   container.scrollTop = container.scrollHeight;
-}
-
-// =================== Music player ===================
-let _ytPlayer = null;
-let _ytReady = false;
-let _ytPendingLoad = null; // { videoId, currentTime, playing }
-
-function loadYouTubeAPI() {
-  if (window.YT && window.YT.Player) { _ytReady = true; return; }
-  if (document.getElementById('_yt_api_script')) return;
-  const tag = document.createElement('script');
-  tag.id = '_yt_api_script';
-  tag.src = 'https://www.youtube.com/iframe_api';
-  document.head.appendChild(tag);
-  window.onYouTubeIframeAPIReady = () => {
-    _ytReady = true;
-    if (!document.getElementById('ytPlayer')) return;
-    _ytPlayer = new YT.Player('ytPlayer', {
-      height: '0', width: '0',
-      playerVars: { autoplay: 1, controls: 0, origin: location.origin || '*' },
-      events: {
-        onReady: () => {
-          const volEl = $('#musicVolume');
-          if (volEl) _ytPlayer.setVolume(parseInt(volEl.value, 10));
-          if (_ytPendingLoad) {
-            const p = _ytPendingLoad; _ytPendingLoad = null;
-            _ytPlayer.loadVideoById({ videoId: p.videoId, startSeconds: p.currentTime || 0 });
-            if (!p.playing) _ytPlayer.pauseVideo();
-          }
-        },
-        onStateChange: ev => {
-          if (ev.data === YT.PlayerState.ENDED && ROLE === 'gm') {
-            sendOp({ type: 'music-stop' });
-          }
-        },
-      },
-    });
-  };
-}
-
-function ytVideoIdFromUrl(url) {
-  try {
-    const u = new URL(url);
-    if (u.hostname.includes('youtu.be')) return u.pathname.slice(1);
-    return u.searchParams.get('v') || null;
-  } catch { return null; }
-}
-
-function setupMusicPlayer() {
-  loadYouTubeAPI();
-  const toggle = $('#musicToggle');
-  if (toggle) {
-    toggle.appendChild(icon('chevron-down'));
-    let collapsed = false;
-    toggle.addEventListener('click', () => {
-      collapsed = !collapsed;
-      $('#musicOverlay')?.classList.toggle('collapsed', collapsed);
-      toggle.replaceChildren(icon(collapsed ? 'chevron-up' : 'chevron-down'));
-    });
-  }
-  // Volume (local only)
-  const volEl = $('#musicVolume');
-  const volLabel = $('#musicVolLabel');
-  if (volEl) {
-    volEl.addEventListener('input', () => {
-      const v = parseInt(volEl.value, 10);
-      if (volLabel) volLabel.textContent = v + '%';
-      if (_ytPlayer && _ytReady) _ytPlayer.setVolume(v);
-    });
-  }
-  // Play/Pause (GM only)
-  const playBtn = $('#musicPlayBtn');
-  if (playBtn) {
-    playBtn.appendChild(icon('target')); // placeholder, updated by syncMusicPlayerUI
-    if (ROLE === 'gm') {
-      playBtn.addEventListener('click', () => {
-        const s = activeState(); if (!s?.music) return;
-        if (s.music.playing) {
-          const ct = _ytPlayer ? _ytPlayer.getCurrentTime() : 0;
-          sendOp({ type: 'music-pause', currentTime: ct });
-        } else {
-          const ct = _ytPlayer ? _ytPlayer.getCurrentTime() : 0;
-          sendOp({ type: 'music-play', currentTime: ct });
-        }
-      });
-    } else {
-      playBtn.disabled = true;
-      playBtn.title = 'Only the GM can control playback';
-    }
-  }
-  // Restart (GM only)
-  const prevBtn = $('#musicPrevBtn');
-  if (prevBtn) {
-    prevBtn.appendChild(icon('refresh'));
-    if (ROLE === 'gm') {
-      prevBtn.addEventListener('click', () => sendOp({ type: 'music-play', currentTime: 0 }));
-    } else {
-      prevBtn.disabled = true;
-    }
-  }
-  // Stop (GM only)
-  const stopBtn = $('#musicStopBtn');
-  if (stopBtn) {
-    stopBtn.appendChild(icon('close'));
-    if (ROLE === 'gm') {
-      stopBtn.addEventListener('click', () => sendOp({ type: 'music-stop' }));
-    } else {
-      stopBtn.disabled = true;
-    }
-  }
-  // Load URL (GM only, element only exists in gm.html)
-  const loadBtn = $('#musicLoadBtn');
-  const urlInput = $('#musicUrlInput');
-  if (loadBtn && urlInput) {
-    const doLoad = () => {
-      const vid = ytVideoIdFromUrl(urlInput.value.trim());
-      if (!vid) { alert('Could not extract YouTube video ID from that URL.'); return; }
-      sendOp({ type: 'music-load', videoId: vid, title: urlInput.value.trim() });
-      urlInput.value = '';
-    };
-    loadBtn.addEventListener('click', doLoad);
-    urlInput.addEventListener('keydown', e => { if (e.key === 'Enter') doLoad(); });
-  }
-}
-
-function syncMusicPlayerUI() {
-  const s = activeState(); if (!s?.music) return;
-  const np = $('#musicNowPlaying');
-  const playBtn = $('#musicPlayBtn');
-  if (np) np.textContent = s.music.title || 'No track loaded';
-  if (playBtn) {
-    playBtn.replaceChildren(icon(s.music.playing ? 'close' : 'target')); // pause/play icon placeholder
-    // Use chevrons as stand-ins: chevron-right = play, chevron-down = pause
-    playBtn.replaceChildren(icon(s.music.playing ? 'chevron-down' : 'chevron-right'));
-    playBtn.title = s.music.playing ? 'Pause' : 'Play';
-  }
-}
-
-function syncMusicPlayer(prevMusic, music) {
-  if (!music || !music.videoId) return;
-  const elapsed = music.playing ? (Date.now() - (music.syncedAt || 0)) / 1000 : 0;
-  const targetTime = (music.currentTime || 0) + elapsed;
-  if (!_ytReady || !_ytPlayer) {
-    // Store full intent — applied once the YT API fires onReady
-    _ytPendingLoad = { videoId: music.videoId, currentTime: targetTime, playing: music.playing };
-    return;
-  }
-  const prevId = prevMusic?.videoId;
-  if (music.videoId !== prevId) {
-    // New video — load and seek; YT auto-plays when autoplay:1, so pause if needed
-    _ytPlayer.loadVideoById({ videoId: music.videoId, startSeconds: targetTime });
-    if (!music.playing) {
-      // Give the player a moment to load before pausing
-      setTimeout(() => { if (_ytPlayer) _ytPlayer.pauseVideo(); }, 500);
-    }
-    return;
-  }
-  // Same video — sync play state
-  if (music.playing) {
-    _ytPlayer.seekTo(targetTime, true);
-    _ytPlayer.playVideo();
-  } else {
-    _ytPlayer.seekTo(music.currentTime || 0, true);
-    _ytPlayer.pauseVideo();
-  }
 }
 
 // =================== Token detail popup ===================
