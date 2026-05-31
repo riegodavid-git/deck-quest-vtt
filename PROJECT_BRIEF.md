@@ -1,7 +1,7 @@
 # Deck Quest VTT — Project Brief
 
 > **Last updated:** 2026-06-01  
-> **Latest release:** v0.2.3 (main) · v0.3.0-ui (ui-redesign branch)  
+> **Latest release:** v0.3.5  
 > **GitHub repo:** https://github.com/riegodavid-git/deck-quest-vtt  
 > **Live relay server:** https://deck-quest-vtt.onrender.com  
 > **Official game page:** https://www.garagesofagames.com/games/deck-quest
@@ -219,13 +219,24 @@ Simple WebSocket relay. Rooms keyed by `roomCode`. Routes messages between GM an
 - [x] New Session button
 
 ### UI / UX
+- [x] Gold/parchment/charcoal design system (Stitch-inspired)
+- [x] Glassmorphism floating panels (`backdrop-filter: blur`)
+- [x] Base64-embedded fonts: Libre Caslon Text, Hanken Grotesk, JetBrains Mono
+- [x] Inline SVG icon set (no emoji, no CDN dependency)
 - [x] Panel expansion state preserved across rerenders
 - [x] Inputs commit on Enter or blur only (no typing-while-syncing wipe)
 - [x] Focus preserved during state rerenders (`withPreservedFocus`)
 - [x] Right-click menus reposition to stay inside viewport
-- [x] Deck / Discard panels: movable (drag handle), hideable (— button), toggleable from toolbar
-- [x] Log overlay: movable from header bar, collapsible
+- [x] Deck / Discard panels: slide-toggle (GM only), tabs re-open them
+- [x] Log overlay: collapsible header toggle
+- [x] Chat panel: real-time text chat for all clients
 - [x] Dice roller: d4/d6/d8/d10/d12/d20/d100, custom `NdM+K`, results broadcast to log
+- [x] GM notes: private collapsible notepad in right rail
+- [x] Token HP/armor bars above figurines (below for character tokens)
+- [x] Skull overlay when token HP reaches 0
+- [x] Token detail popup (right-click → edit HP/armor current/max)
+- [x] Resize handle hidden until hover; no lock icon clutter
+- [x] Number inputs have no browser spinner arrows
 
 ---
 
@@ -332,7 +343,12 @@ node -e "const fs=require('fs'); try{new Function(fs.readFileSync('templates/sha
 
 | Version | Date | Summary |
 |---|---|---|
-| v0.3.0-ui | 2026-06-01 | UI redesign branch (`ui-redesign`): gold-on-charcoal palette, glass panels, Libre Caslon + Hanken Grotesk + JetBrains Mono base64-embedded fonts, SVG icon set, stat medallions, gold token rings. Functional behavior unchanged. |
+| v0.3.5 | 2026-06-01 | Resize handle hidden until hover; lock icon removed to reduce clutter |
+| v0.3.4 | 2026-06-01 | Remove music player (incomplete); player template strips deck/discard panels; number input spinners hidden |
+| v0.3.3 | 2026-06-01 | Music panel repositioned |
+| v0.3.2 | 2026-06-01 | Fix chat sync to players (viewFor missing chat/music); fix music YT player init; discard panel overlap fixed; 2-column deck grid, no scroll |
+| v0.3.1 | 2026-06-01 | Loading time fix (JSON.parse vs JS literal); chat panel; HP/armor bars on tokens; skull at HP 0; token detail popup; GM notes; token 1:1 resize |
+| v0.3.0 | 2026-06-01 | Stitch-inspired UI redesign merged to main: gold/parchment palette, glassmorphism panels, base64-embedded fonts (Libre Caslon + Hanken Grotesk + JetBrains Mono), inline SVG icons, stat medallions, grouped-item copper rings |
 | v0.2.3 | 2026-06-01 | Hotfix: syntax error in context menu broke page load |
 | v0.2.2 | 2026-06-01 | Multi-select (Ctrl+click / lasso), movable panels, token panel position fix |
 | v0.2.1 | 2026-06-01 | D&D token panel: 1924 tokens, 90+ categories, search, click to drop |
