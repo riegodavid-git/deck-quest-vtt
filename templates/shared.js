@@ -17,6 +17,10 @@ const CARDS_BY_ID = {};
 const CARDS_BY_TYPE = { role:[], skill:[], item:[], location:[], adversary:[], info:[] };
 for (const c of CARDS) { CARDS_BY_ID[c.id] = c; CARDS_BY_TYPE[c.type].push(c); }
 
+// Built-in token lookup — id → token object
+const TOKENS_BY_ID = {};
+for (const t of TOKENS) TOKENS_BY_ID[t.id] = t;
+
 // =================== Utilities ===================
 function $(sel, root) { return (root||document).querySelector(sel); }
 function $$(sel, root) { return Array.from((root||document).querySelectorAll(sel)); }
@@ -353,6 +357,7 @@ function requestMissingAssets(meta) {
   // Player side: compare meta vs local cache; request anything missing.
   for (const hash of Object.keys(meta || {})) {
     if (ASSETS[hash]) continue;
+    if (TOKENS_BY_ID[hash]) continue; // built-in token — already embedded, no transfer needed
     cacheAssetGet(hash).then(cached => {
       if (cached) { ASSETS[hash] = cached.dataUrl; rerenderAll(); }
       else { connections.gm?.send({ type:'asset-request', hash }); }
@@ -795,7 +800,8 @@ function renderFigurines() {
       url = pfpHash ? ASSETS[pfpHash] : null;
       ringColor = charPlayer?.color || '#3b82f6';
     } else {
-      url = ASSETS[f.assetHash];
+      // Uploaded assets first; fall back to built-in token library (no transfer needed)
+      url = ASSETS[f.assetHash] || TOKENS_BY_ID[f.assetHash]?.image;
     }
     const eff = f.effects || {};
     let opacity = f.opacity != null ? f.opacity : 1;
@@ -1790,6 +1796,134 @@ function setupDiceUI() {
   row.appendChild(customI);
 }
 
+// =================== Token panel ===================
+const tokenCatCollapsed = new Set();
+
+function openTokenPanel() {
+  $$('.token-panel').forEach(p => p.remove());
+
+  const overlay = el('div', { class: 'token-panel' });
+  const box     = el('div', { class: 'token-box' });
+
+  // Header
+  const hdr = el('div', { class: 'token-header' });
+  hdr.appendChild(el('span', {}, '🎭 D&D Token Collection'));
+  const searchI = el('input', { type: 'text', placeholder: 'Search by name or category…', class: 'token-search' });
+  hdr.appendChild(searchI);
+  hdr.appendChild(el('button', { class: 'mini', onclick: () => overlay.remove() }, '×'));
+  box.appendChild(hdr);
+
+  const content = el('div', { class: 'token-content' });
+  box.appendChild(content);
+  overlay.appendChild(box);
+  document.body.appendChild(overlay);
+
+  // Close on backdrop click
+  overlay.addEventListener('click', e => { if (e.target === overlay) overlay.remove(); });
+
+  function addTokenToTable(t) {
+    const stage = $('#tableStage');
+    const r = stage ? stage.getBoundingClientRect() : { width: 800, height: 600 };
+    const cx = (r.width  / 2 - tablePanX) / tableZoom - 60;
+    const cy = (r.height / 2 - tablePanY) / tableZoom - 60;
+    sendOp({ type: 'add-figurine', hash: t.id, w: 120, h: 120, label: t.name, x: Math.round(cx), y: Math.round(cy) });
+  }
+
+  function tokenThumb(t) {
+    const div = el('div', { class: 'token-thumb', title: t.name });
+    div.appendChild(el('img', { src: t.image, draggable: 'false' }));
+    div.appendChild(el('div', { class: 'token-name' }, t.name));
+    div.addEventListener('click', () => addTokenToTable(t));
+    return div;
+  }
+
+  function buildTree() {
+    // tree[cat][subcat|'_root'] = [tokens]
+    const tree = {};
+    for (const t of TOKENS) {
+      const cat = t.cats[0] || 'Uncategorized';
+      const sub = t.cats[1] || '_root';
+      if (!tree[cat]) tree[cat] = {};
+      if (!tree[cat][sub]) tree[cat][sub] = [];
+      tree[cat][sub].push(t);
+    }
+    // Sort subcategories, keeping _root first
+    for (const cat of Object.keys(tree)) {
+      const subs = tree[cat];
+      const root = subs['_root'];
+      delete subs['_root'];
+      const sorted = {};
+      if (root) sorted['_root'] = root;
+      for (const k of Object.keys(subs).sort()) sorted[k] = subs[k];
+      tree[cat] = sorted;
+    }
+    return tree;
+  }
+
+  function render(q) {
+    content.innerHTML = '';
+    const query = q.trim().toLowerCase();
+
+    if (query) {
+      // Flat filtered results
+      const hits = TOKENS.filter(t =>
+        t.name.toLowerCase().includes(query) ||
+        t.cats.join(' ').toLowerCase().includes(query)
+      );
+      if (!hits.length) { content.appendChild(el('div', { class: 'token-empty' }, 'No tokens found.')); return; }
+      const grid = el('div', { class: 'token-grid' });
+      for (const t of hits.slice(0, 300)) grid.appendChild(tokenThumb(t));
+      if (hits.length > 300) grid.appendChild(el('div', { style: { color: 'var(--muted)', fontSize: '11px', padding: '4px' } }, `…and ${hits.length - 300} more — refine your search`));
+      content.appendChild(grid);
+      return;
+    }
+
+    // Grouped by category
+    const tree = buildTree();
+    for (const [cat, subs] of Object.entries(tree).sort(([a],[b]) => a.localeCompare(b))) {
+      const catKey = 'cat:' + cat;
+      const collapsed = tokenCatCollapsed.has(catKey);
+      let total = 0;
+      for (const ts of Object.values(subs)) total += ts.length;
+
+      const catHdr = el('div', { class: 'token-cat-hdr', onclick: () => {
+        collapsed ? tokenCatCollapsed.delete(catKey) : tokenCatCollapsed.add(catKey);
+        render(searchI.value);
+      }}, (collapsed ? '▶ ' : '▼ ') + cat + ' (' + total + ')');
+      content.appendChild(catHdr);
+
+      if (!collapsed) {
+        const catBody = el('div', { class: 'token-cat-body' });
+        for (const [sub, tokens] of Object.entries(subs)) {
+          if (sub === '_root') {
+            const grid = el('div', { class: 'token-grid' });
+            for (const t of tokens) grid.appendChild(tokenThumb(t));
+            catBody.appendChild(grid);
+          } else {
+            const subKey = 'sub:' + cat + '/' + sub;
+            const subCollapsed = tokenCatCollapsed.has(subKey);
+            const subHdr = el('div', { class: 'token-subcat-hdr', onclick: () => {
+              subCollapsed ? tokenCatCollapsed.delete(subKey) : tokenCatCollapsed.add(subKey);
+              render(searchI.value);
+            }}, (subCollapsed ? '  ▶ ' : '  ▼ ') + sub + ' (' + tokens.length + ')');
+            catBody.appendChild(subHdr);
+            if (!subCollapsed) {
+              const grid = el('div', { class: 'token-grid' });
+              for (const t of tokens) grid.appendChild(tokenThumb(t));
+              catBody.appendChild(grid);
+            }
+          }
+        }
+        content.appendChild(catBody);
+      }
+    }
+  }
+
+  searchI.addEventListener('input', () => render(searchI.value));
+  render('');
+  setTimeout(() => searchI.focus(), 50);
+}
+
 function setupToolbarUI() {
   const tb = $('#toolbar'); if (!tb) return;
   for (const t of ['pointer','pen','eraser']) {
@@ -1810,6 +1944,8 @@ function setupToolbarUI() {
     applyTableTransform();
     zoomSlider.value = '1';
   }}, '⌖'));
+  // Token library panel
+  tb.appendChild(el('button', { class:'tool-btn', title:'Browse & add D&D tokens', onclick: () => openTokenPanel() }, '🎭 Tokens'));
   // Map + Token uploads — available to everyone.
   const mapBtn = el('label', { class:'tool-btn' }, '+ Add Map');
   const mapI = el('input', { type:'file', accept:'image/*', style:{display:'none'}});

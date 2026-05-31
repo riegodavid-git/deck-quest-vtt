@@ -130,6 +130,26 @@ input:focus, select:focus { outline:1px solid var(--accent); }
 .join-box h2 { margin:0 0 10px; }
 .jrow { display:flex; flex-direction:column; gap:3px; }
 .jrow label { font-size:11px; color:var(--muted); }
+
+/* ── Token panel ── */
+.token-panel { position:fixed; inset:0; background:rgba(0,0,0,.75); z-index:3001; display:flex; align-items:flex-start; justify-content:center; padding-top:40px; }
+.token-box { background:var(--panel); border:1px solid var(--accent); border-radius:8px; width:860px; max-width:95vw; max-height:82vh; display:flex; flex-direction:column; }
+.token-header { display:flex; align-items:center; gap:8px; padding:10px 14px; background:#000; border-bottom:1px solid var(--line); border-radius:8px 8px 0 0; flex-shrink:0; }
+.token-header > span { font-weight:600; font-size:14px; white-space:nowrap; }
+.token-search { flex:1; font-size:13px; padding:5px 8px; background:var(--panel2); color:var(--text); border:1px solid var(--line); border-radius:3px; }
+.token-search:focus { outline:1px solid var(--accent); }
+.token-content { overflow-y:auto; padding:8px 10px; }
+.token-cat-hdr { padding:5px 10px; background:var(--panel2); border:1px solid var(--line); border-radius:4px; cursor:pointer; font-weight:600; font-size:12px; margin:6px 0 3px; user-select:none; }
+.token-cat-hdr:hover { background:var(--accent); border-color:var(--accent); }
+.token-cat-body { padding-left:10px; }
+.token-subcat-hdr { padding:3px 8px; background:rgba(255,255,255,.04); border-radius:3px; cursor:pointer; font-size:11px; color:var(--muted); margin:4px 0 2px; user-select:none; }
+.token-subcat-hdr:hover { color:var(--text); background:rgba(255,255,255,.1); }
+.token-grid { display:flex; flex-wrap:wrap; gap:6px; padding:4px 0 8px; }
+.token-thumb { width:72px; cursor:pointer; text-align:center; }
+.token-thumb img { width:72px; height:72px; object-fit:contain; border-radius:50%; background:rgba(255,255,255,.04); border:2px solid transparent; display:block; transition:border-color .1s; }
+.token-thumb:hover img { border-color:var(--accent); }
+.token-name { font-size:9px; color:var(--muted); margin-top:2px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+.token-empty { text-align:center; color:var(--muted); padding:40px; }
 </style>
 </head>
 <body>
@@ -159,7 +179,8 @@ input:focus, select:focus { outline:1px solid var(--accent); }
 </div>
 <script>
 const ROLE = 'player';
-const CARDS = %%CARDS_JSON%%;
+const CARDS  = %%CARDS_JSON%%;
+const TOKENS = %%TOKENS_JSON%%;
 %%SHARED_JS%%
 </script>
 </body>
