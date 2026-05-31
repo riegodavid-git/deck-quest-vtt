@@ -125,6 +125,7 @@ function newState(playerCount) {
       info: { class: '', race: '', age: '', weight: '' },
       gold: 0,
       inventory: [],
+      notes: '',
       hand: [],
       connected: false,
       color: PLAYER_COLORS[i-1],
@@ -156,10 +157,8 @@ function viewFor(playerId) {
   for (const [pid, p] of Object.entries(s.hands)) {
     if (pid === 'gm') continue; // never send GM hand to players
     view.hands[pid] = { ...p };
-    // Show card backs only for OTHER players' face-down cards (not your own).
-    if (pid !== playerId) {
-      view.hands[pid].hand = p.hand.map(c => c.faceUp ? c : { instId: c.instId, cardId: null, faceUp: false });
-    }
+    // Player hands are fully visible to all players — no face-down hiding.
+    // (GM hand is still excluded entirely above.)
   }
   return view;
 }
@@ -471,12 +470,21 @@ function applyOp(op, by) {
       let c = null;
       if (op.where === 'table') c = s.table.cards.find(c => c.instId === op.instId);
       else c = s.hands[op.owner]?.hand.find(c => c.instId === op.instId);
-      if (c) c.faceUp = !c.faceUp;
+      if (!c) return;
+      if (op.where === 'table' && c.locked && by !== 'gm') return;
+      c.faceUp = !c.faceUp;
       break;
     }
     case 'move-table-card': {
       const c = s.table.cards.find(c => c.instId === op.instId); if (!c) return;
+      if (c.locked && by !== 'gm') return;
       c.x = op.x; c.y = op.y; c.z = nextZ();
+      break;
+    }
+    case 'lock-table-card': {
+      if (by !== 'gm') return;
+      const c = s.table.cards.find(c => c.instId === op.instId); if (!c) return;
+      c.locked = !c.locked;
       break;
     }
     case 'transfer-card': {
@@ -484,7 +492,9 @@ function applyOp(op, by) {
       let card = null;
       if (op.from.where === 'table') {
         const i = s.table.cards.findIndex(c => c.instId === op.from.instId);
-        if (i<0) return; card = s.table.cards.splice(i,1)[0];
+        if (i<0) return;
+        if (s.table.cards[i].locked && by !== 'gm') return;
+        card = s.table.cards.splice(i,1)[0];
       } else {
         const arr = s.hands[op.from.owner]?.hand; if (!arr) return;
         const i = arr.findIndex(c => c.instId === op.from.instId);
@@ -634,8 +644,10 @@ function tryRestoreLast() {
 
 // =================== Rendering ===================
 function rerenderAll() {
-  if (ROLE === 'gm') renderAllGM();
-  else renderAllPlayer();
+  withPreservedFocus(() => {
+    if (ROLE === 'gm') renderAllGM();
+    else renderAllPlayer();
+  });
 }
 function renderAllGM() {
   renderTopbar(); renderTable(); renderRightRail(); renderLog();
@@ -712,12 +724,16 @@ function renderTableCards() {
   layer.innerHTML = '';
   for (const c of s.table.cards) {
     const card = CARDS_BY_ID[c.cardId];
-    const div = el('div', { class:'placed-card', style:{ left:c.x+'px', top:c.y+'px', transform:`rotate(${c.rot||0}deg)`, zIndex:c.z||1 } });
+    const div = el('div', { class:'placed-card' + (c.locked?' locked':''), style:{ left:c.x+'px', top:c.y+'px', transform:`rotate(${c.rot||0}deg)`, zIndex:c.z||1 } });
     div.appendChild(el('img', { class:'card-img', src: c.faceUp ? card.image : card.back, draggable:'false' }));
-    if (ROLE === 'gm') {
+    if (c.locked) div.appendChild(el('div', { class:'figurine-lock-icon', title:'Locked by GM' }, '🔒'));
+    if (!c.locked) {
       makeDraggable(div, (x,y) => sendOp({ type:'move-table-card', instId:c.instId, x, y }));
-      div.addEventListener('contextmenu', e => { e.preventDefault(); showCardContextMenu({ where:'table', instId:c.instId, cardId:c.cardId, faceUp:c.faceUp }, e); });
     }
+    div.addEventListener('contextmenu', e => {
+      e.preventDefault();
+      showCardContextMenu({ where:'table', instId:c.instId, cardId:c.cardId, faceUp:c.faceUp, locked:c.locked }, e);
+    });
     layer.appendChild(div);
   }
 }
@@ -911,10 +927,10 @@ function playerPanel(pid, p, isSelfOrEditable) {
   // stats body
   const body = el('div', { class:'player-body' });
   // Name + info
-  body.appendChild(field('Name', p.name, editable, v => sendOp({ type:'set-player-field', owner:pid, path:'name', value:v })));
+  body.appendChild(field('Name', p.name, editable, v => sendOp({ type:'set-player-field', owner:pid, path:'name', value:v }), 'text', `${pid}.name`));
   const infoRow = el('div', { class:'row' });
   for (const k of ['class','race','age','weight']) {
-    infoRow.appendChild(field(k[0].toUpperCase()+k.slice(1), p.info[k], editable, v => sendOp({ type:'set-player-field', owner:pid, path:'info.'+k, value:v })));
+    infoRow.appendChild(field(k[0].toUpperCase()+k.slice(1), p.info[k], editable, v => sendOp({ type:'set-player-field', owner:pid, path:'info.'+k, value:v }), 'text', `${pid}.info.${k}`));
   }
   body.appendChild(infoRow);
   // HP / Armor
@@ -925,11 +941,13 @@ function playerPanel(pid, p, isSelfOrEditable) {
   // Stats
   const statRow = el('div', { class:'stat-grid' });
   for (const k of ['str','agi','int','cha','sta']) {
-    statRow.appendChild(field(k.toUpperCase(), p.stats[k], editable, v => sendOp({ type:'set-player-field', owner:pid, path:'stats.'+k, value:parseInt(v,10)||0 }), 'number'));
+    statRow.appendChild(field(k.toUpperCase(), p.stats[k], editable, v => sendOp({ type:'set-player-field', owner:pid, path:'stats.'+k, value:parseInt(v,10)||0 }), 'number', `${pid}.stats.${k}`));
   }
   body.appendChild(statRow);
   // Gold
-  body.appendChild(field('Gold', p.gold, editable, v => sendOp({ type:'set-player-field', owner:pid, path:'gold', value:parseInt(v,10)||0 }), 'number'));
+  body.appendChild(field('Gold', p.gold, editable, v => sendOp({ type:'set-player-field', owner:pid, path:'gold', value:parseInt(v,10)||0 }), 'number', `${pid}.gold`));
+  // Notes
+  body.appendChild(textareaField('Notes', p.notes, editable, v => sendOp({ type:'set-player-field', owner:pid, path:'notes', value:v }), `${pid}.notes`));
   // Inventory
   const inv = el('div', { class:'inventory' });
   inv.appendChild(el('div', { class:'section-label' }, 'Inventory'));
@@ -940,7 +958,8 @@ function playerPanel(pid, p, isSelfOrEditable) {
   }
   if (editable) {
     const add = el('div', { class:'inv-add' });
-    const input = el('input', { type:'text', placeholder:'Add item...' });
+    const input = el('input', { type:'text', placeholder:'Add item (Enter)...' });
+    input.dataset.fieldKey = `${pid}.inv-add`;
     input.addEventListener('keydown', e => { if (e.key==='Enter' && input.value.trim()) { sendOp({ type:'add-inventory', owner:pid, name:input.value.trim() }); input.value=''; }});
     add.appendChild(input);
     inv.appendChild(add);
@@ -963,17 +982,66 @@ function playerPanel(pid, p, isSelfOrEditable) {
   return panel;
 }
 
-function field(label, val, editable, onChange, type='text') {
+function field(label, val, editable, onChange, type='text', key) {
   const wrap = el('div', { class:'field' });
   wrap.appendChild(el('label', {}, label));
   if (editable) {
     const inp = el('input', { type, value: val==null?'':val });
-    inp.addEventListener('change', e => onChange(e.target.value));
+    if (key) inp.dataset.fieldKey = key;
+    // Commit only on Enter or blur — typing is local until then, so concurrent
+    // state updates don't wipe what the user is mid-typing.
+    inp.addEventListener('keydown', e => {
+      if (e.key === 'Enter') { e.preventDefault(); onChange(e.target.value); e.target.blur(); }
+      else if (e.key === 'Escape') { e.target.value = val==null?'':String(val); e.target.blur(); }
+    });
+    inp.addEventListener('blur', e => {
+      const cur = type === 'number' ? String(val==null?'':val) : (val==null?'':String(val));
+      if (e.target.value !== cur) onChange(e.target.value);
+    });
     wrap.appendChild(inp);
   } else {
     wrap.appendChild(el('div', { class:'val' }, String(val==null?'':val)));
   }
   return wrap;
+}
+
+function textareaField(label, val, editable, onChange, key) {
+  const wrap = el('div', { class:'field' });
+  wrap.appendChild(el('label', {}, label));
+  if (editable) {
+    const ta = el('textarea', { rows:'3', placeholder:'Notes...' });
+    ta.value = val || '';
+    if (key) ta.dataset.fieldKey = key;
+    ta.addEventListener('keydown', e => {
+      // Ctrl/Cmd+Enter commits; Enter alone makes a newline.
+      if (e.key === 'Enter' && (e.ctrlKey || e.metaKey)) { e.preventDefault(); onChange(e.target.value); e.target.blur(); }
+      else if (e.key === 'Escape') { e.target.value = val || ''; e.target.blur(); }
+    });
+    ta.addEventListener('blur', e => { if (e.target.value !== (val || '')) onChange(e.target.value); });
+    wrap.appendChild(ta);
+  } else {
+    wrap.appendChild(el('div', { class:'val', style:{whiteSpace:'pre-wrap'} }, val || ''));
+  }
+  return wrap;
+}
+
+// Run a render but preserve typing in the currently-focused input.
+function withPreservedFocus(renderFn) {
+  const active = document.activeElement;
+  const isInput = active && (active.tagName === 'INPUT' || active.tagName === 'TEXTAREA');
+  const key = isInput ? active.dataset.fieldKey : null;
+  const liveValue = isInput ? active.value : null;
+  const selStart = isInput ? active.selectionStart : null;
+  const selEnd = isInput ? active.selectionEnd : null;
+  renderFn();
+  if (key) {
+    const newEl = document.querySelector('[data-field-key="' + key.replace(/"/g, '\\"') + '"]');
+    if (newEl) {
+      newEl.value = liveValue;  // restore uncommitted text exactly as typed
+      newEl.focus();
+      try { newEl.setSelectionRange(selStart, selEnd); } catch {}
+    }
+  }
 }
 
 function vitalBar(label, obj, key, color, editable, pid) {
@@ -985,11 +1053,22 @@ function vitalBar(label, obj, key, color, editable, pid) {
   wrap.appendChild(bar);
   const num = el('div', { class:'vital-num' });
   if (editable) {
-    const cur = el('input', { type:'number', value:obj.current, style:{width:'50px'}});
-    cur.addEventListener('change', e => sendOp({ type:'set-player-field', owner:pid, path:key+'.current', value:parseInt(e.target.value,10)||0 }));
-    const max = el('input', { type:'number', value:obj.max, style:{width:'50px'}});
-    max.addEventListener('change', e => sendOp({ type:'set-player-field', owner:pid, path:key+'.max', value:parseInt(e.target.value,10)||0 }));
-    num.appendChild(cur); num.appendChild(document.createTextNode(' / ')); num.appendChild(max);
+    const mkInput = (val, path) => {
+      const inp = el('input', { type:'number', value:val, style:{width:'50px'}});
+      inp.dataset.fieldKey = `${pid}.${path}`;
+      inp.addEventListener('keydown', e => {
+        if (e.key === 'Enter') { e.preventDefault(); sendOp({ type:'set-player-field', owner:pid, path, value:parseInt(e.target.value,10)||0 }); e.target.blur(); }
+        else if (e.key === 'Escape') { e.target.value = val; e.target.blur(); }
+      });
+      inp.addEventListener('blur', e => {
+        const v = parseInt(e.target.value,10)||0;
+        if (v !== val) sendOp({ type:'set-player-field', owner:pid, path, value:v });
+      });
+      return inp;
+    };
+    num.appendChild(mkInput(obj.current, key+'.current'));
+    num.appendChild(document.createTextNode(' / '));
+    num.appendChild(mkInput(obj.max, key+'.max'));
   } else {
     num.textContent = obj.current + ' / ' + obj.max;
   }
@@ -999,14 +1078,11 @@ function vitalBar(label, obj, key, color, editable, pid) {
 
 function handCardEl(c, owner, editable) {
   const card = c.cardId ? CARDS_BY_ID[c.cardId] : null;
-  // Visibility model:
-  //   - cardId null   → other player's face-down card; show back only.
-  //   - cardId known  → owner sees the face (always); GM sees the face (always).
-  //     The faceUp flag controls whether OTHER players see it (handled in viewFor).
-  const isOwnerOrGM = ROLE === 'gm' || owner === MY_ID;
-  const showFace = !!card && isOwnerOrGM;
+  // All hands (other than the GM's, which is filtered upstream) are now visible to
+  // every player. Show the face whenever we have the cardId.
+  const showFace = !!card;
   const back = card?.back || CARDS_BY_TYPE.role[0].back;
-  const div = el('div', { class:'hand-card' + (c.faceUp ? ' revealed' : ''), title: showFace ? card.name + (c.faceUp ? ' (revealed)' : ' (private)') : '' });
+  const div = el('div', { class:'hand-card', title: showFace ? card.name : '' });
   div.appendChild(el('img', { class:'card-img', src: showFace ? card.image : back }));
   if (editable !== false && (ROLE === 'gm' || owner === MY_ID)) {
     div.addEventListener('click', () => sendOp({ type:'flip-card', where:'hand', owner, instId:c.instId }));
@@ -1050,6 +1126,10 @@ function showCardContextMenu(info, e) {
   const items = [
     { label: info.faceUp ? 'Flip face-down' : 'Flip face-up', action: () => sendOp({ type:'flip-card', where:info.where, owner:info.owner, instId:info.instId }) },
   ];
+  if (info.where === 'table' && ROLE === 'gm') {
+    items.push({ label: info.locked ? '🔓 Unlock (allow players to move)' : '🔒 Lock (only GM can move)',
+      action: () => sendOp({ type:'lock-table-card', instId: info.instId }) });
+  }
   if (info.where === 'hand') {
     items.push({ label:'Move to table', action: () => sendOp({ type:'transfer-card', from:info, to:{ where:'table' }}) });
     if (ROLE === 'gm') {

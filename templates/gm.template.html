@@ -54,6 +54,7 @@ input:focus, select:focus { outline:1px solid var(--accent); }
 .effect-badge { background:rgba(0,0,0,.75); border-radius:10px; padding:2px 4px; font-size:12px; line-height:1; border:1px solid rgba(255,255,255,.3); }
 
 .placed-card { position:absolute; width:140px; cursor:move; }
+.placed-card.locked { cursor:default; outline: 2px solid #f59e0b; outline-offset:1px; border-radius:5px; }
 .placed-card .card-img { width:100%; display:block; border-radius:4px; box-shadow: 0 4px 12px rgba(0,0,0,.5); }
 
 .cursor { position:absolute; pointer-events:none; transform: translate(-2px,-2px); }
@@ -79,7 +80,8 @@ input:focus, select:focus { outline:1px solid var(--accent); }
 .player-panel.expanded .player-body { display:flex; }
 .field { display:flex; flex-direction:column; gap:2px; flex:1; min-width:0; }
 .field label { font-size:10px; color:var(--muted); text-transform:uppercase; letter-spacing:.5px; }
-.field input { width:100%; }
+.field input, .field textarea { width:100%; background:var(--panel); color:var(--text); border:1px solid var(--line); border-radius:3px; padding:4px 6px; font-size:12px; font-family:inherit; resize:vertical; }
+.field input:focus, .field textarea:focus { outline:1px solid var(--accent); }
 .field .val { padding:3px 6px; background:var(--panel); border-radius:3px; }
 .row { display:flex; gap:6px; }
 .vital { flex:1; }
