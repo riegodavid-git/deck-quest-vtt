@@ -16,7 +16,30 @@ const ROOT       = __dirname;
 const PNG_ROOT   = path.join(ROOT, 'Deck Quest Open Source PNGs');
 const TOKEN_ROOT = path.join(PNG_ROOT, '1st D&D Token  Collection');
 const TEMPLATES  = path.join(ROOT, 'templates');
+const FONTS      = path.join(ROOT, 'fonts');
 const DIST       = path.join(ROOT, 'dist');
+
+// ── Font embedding ───────────────────────────────────────────────────────────
+// Read each woff2, base64-encode, return a CSS string of @font-face rules.
+// Keeps the build self-contained / offline.
+const FONT_FACES = [
+  { family: 'Libre Caslon Text', weight: 700, file: 'libre-caslon-text-700.woff2' },
+  { family: 'Hanken Grotesk',    weight: 400, file: 'hanken-grotesk.woff2' },
+  { family: 'Hanken Grotesk',    weight: 600, file: 'hanken-grotesk.woff2' },
+  { family: 'JetBrains Mono',    weight: 500, file: 'jetbrains-mono-500.woff2' },
+];
+function loadFonts() {
+  let totalBytes = 0;
+  const rules = FONT_FACES.map(({ family, weight, file }) => {
+    const p = path.join(FONTS, file);
+    const buf = fs.readFileSync(p);
+    totalBytes += buf.length;
+    const b64 = buf.toString('base64');
+    return `@font-face{font-family:'${family}';font-style:normal;font-weight:${weight};font-display:block;src:url(data:font/woff2;base64,${b64}) format('woff2');}`;
+  }).join('\n');
+  console.log(`Fonts: ${FONT_FACES.length} @font-face rules, ~${(totalBytes / 1024).toFixed(1)} KB raw`);
+  return rules;
+}
 
 // ── Card backs ───────────────────────────────────────────────────────────────
 const BACKS = {
@@ -127,11 +150,13 @@ async function main() {
   console.log(`Cards JSON: ~${(cardsJson.length  / 1024 / 1024).toFixed(1)} MB`);
   console.log(`Tokens JSON: ~${(tokensJson.length / 1024 / 1024).toFixed(1)} MB`);
 
-  const shared = fs.readFileSync(path.join(TEMPLATES, 'shared.js'), 'utf8');
+  const shared   = fs.readFileSync(path.join(TEMPLATES, 'shared.js'), 'utf8');
+  const fontsCss = loadFonts();
 
   function build(templateName, outName) {
     const tpl = fs.readFileSync(path.join(TEMPLATES, templateName), 'utf8');
     const out = tpl
+      .replace('%%FONTS_CSS%%',   () => fontsCss)
       .replace('%%SHARED_JS%%',   () => shared)
       .replace('%%CARDS_JSON%%',  () => cardsJson)
       .replace('%%TOKENS_JSON%%', () => tokensJson);

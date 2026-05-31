@@ -17,12 +17,70 @@ const CARDS_BY_ID = {};
 const CARDS_BY_TYPE = { role:[], skill:[], item:[], location:[], adversary:[], info:[] };
 for (const c of CARDS) { CARDS_BY_ID[c.id] = c; CARDS_BY_TYPE[c.type].push(c); }
 
-// Built-in token lookup — id → token object
+// Built-in token lookup — id → token object (populated lazily on first token-panel open)
 const TOKENS_BY_ID = {};
-for (const t of TOKENS) TOKENS_BY_ID[t.id] = t;
+let _tokensLoaded = false;
+let _tokensLoadPromise = null;
+function ensureTokens() {
+  if (_tokensLoaded) return Promise.resolve();
+  if (_tokensLoadPromise) return _tokensLoadPromise;
+  _tokensLoadPromise = new Promise(resolve => {
+    const el = document.getElementById('_tokens_data');
+    if (!el) { _tokensLoaded = true; resolve(); return; }
+    // JSON.parse is ~10-50x faster than the equivalent JS literal parse
+    const list = JSON.parse(el.textContent);
+    el.remove();
+    for (const t of list) TOKENS_BY_ID[t.id] = t;
+    _tokensLoaded = true;
+    resolve();
+  });
+  return _tokensLoadPromise;
+}
 
 // Multi-select — set of instIds currently selected
 const selectionSet = new Set();
+
+// =================== Inline SVG icons ===================
+// Self-contained icon set (no font dependency). Stroke-based, scales to currentColor.
+const ICONS = {
+  pointer:        '<svg viewBox="0 0 24 24"><path d="M5 3 L19 11 L12 13 L9 20 Z"/></svg>',
+  pen:            '<svg viewBox="0 0 24 24"><path d="M16 3 L21 8 L8 21 L3 21 L3 16 Z"/><path d="M13 6 L18 11"/></svg>',
+  eraser:         '<svg viewBox="0 0 24 24"><path d="M20 20 L9 20 L3 14 L13 4 L21 12 Z"/><path d="M9 20 L15 14"/></svg>',
+  target:         '<svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><circle cx="12" cy="12" r="4"/><path d="M12 1 L12 5 M12 19 L12 23 M1 12 L5 12 M19 12 L23 12"/></svg>',
+  deck:           '<svg viewBox="0 0 24 24"><rect x="4" y="3" width="14" height="18" rx="2"/><path d="M7 3 L7 21 M11 3 L11 21"/></svg>',
+  discard:        '<svg viewBox="0 0 24 24"><path d="M4 7 L20 7 M9 7 L9 4 L15 4 L15 7"/><path d="M6 7 L7 21 L17 21 L18 7"/><path d="M10 11 L10 17 M14 11 L14 17"/></svg>',
+  tokens:         '<svg viewBox="0 0 24 24"><circle cx="9" cy="9" r="5"/><circle cx="16" cy="16" r="5"/></svg>',
+  map:            '<svg viewBox="0 0 24 24"><path d="M3 6 L9 4 L15 6 L21 4 L21 18 L15 20 L9 18 L3 20 Z"/><path d="M9 4 L9 18 M15 6 L15 20"/></svg>',
+  search:         '<svg viewBox="0 0 24 24"><circle cx="11" cy="11" r="7"/><path d="M21 21 L16 16"/></svg>',
+  dice:           '<svg viewBox="0 0 24 24"><rect x="3" y="3" width="18" height="18" rx="3"/><circle cx="8" cy="8" r="1.2" fill="currentColor"/><circle cx="16" cy="8" r="1.2" fill="currentColor"/><circle cx="12" cy="12" r="1.2" fill="currentColor"/><circle cx="8" cy="16" r="1.2" fill="currentColor"/><circle cx="16" cy="16" r="1.2" fill="currentColor"/></svg>',
+  close:          '<svg viewBox="0 0 24 24"><path d="M5 5 L19 19 M19 5 L5 19"/></svg>',
+  trash:          '<svg viewBox="0 0 24 24"><path d="M4 7 L20 7 M9 7 L9 4 L15 4 L15 7 M6 7 L7 21 L17 21 L18 7"/></svg>',
+  'chevron-up':    '<svg viewBox="0 0 24 24"><path d="M5 15 L12 8 L19 15"/></svg>',
+  'chevron-down':  '<svg viewBox="0 0 24 24"><path d="M5 9 L12 16 L19 9"/></svg>',
+  'chevron-left':  '<svg viewBox="0 0 24 24"><path d="M15 5 L8 12 L15 19"/></svg>',
+  'chevron-right': '<svg viewBox="0 0 24 24"><path d="M9 5 L16 12 L9 19"/></svg>',
+  plus:           '<svg viewBox="0 0 24 24"><path d="M12 4 L12 20 M4 12 L20 12"/></svg>',
+  save:           '<svg viewBox="0 0 24 24"><path d="M5 3 L17 3 L21 7 L21 21 L5 21 Z"/><path d="M7 3 L7 9 L15 9 L15 3 M7 14 L17 14 L17 21 L7 21 Z"/></svg>',
+  load:           '<svg viewBox="0 0 24 24"><path d="M4 5 L10 5 L12 7 L20 7 L20 19 L4 19 Z"/></svg>',
+  refresh:        '<svg viewBox="0 0 24 24"><path d="M3 12 A9 9 0 0 1 19 6"/><path d="M21 4 L21 9 L16 9"/><path d="M21 12 A9 9 0 0 1 5 18"/><path d="M3 20 L3 15 L8 15"/></svg>',
+};
+
+function icon(name, opts) {
+  const span = document.createElement('span');
+  span.className = 'icon' + (opts && opts.class ? ' ' + opts.class : '');
+  span.innerHTML = ICONS[name] || '';
+  if (opts && opts.title) span.title = opts.title;
+  return span;
+}
+
+// Populate any element with a data-icon attribute by injecting the SVG.
+function paintStaticIcons() {
+  document.querySelectorAll('[data-icon]').forEach(node => {
+    const name = node.getAttribute('data-icon');
+    if (!ICONS[name]) return;
+    node.replaceChildren(icon(name));
+  });
+}
 
 // =================== Utilities ===================
 function $(sel, root) { return (root||document).querySelector(sel); }
@@ -57,12 +115,13 @@ function applyTableTransform() {
 }
 function migrateState(state) {
   if (!state || !state.hands) return;
-  // Old shape: s.hands.gm = []. New shape: { name, color, hand: [] }.
   if (Array.isArray(state.hands.gm)) {
     state.hands.gm = { name:'GM', color:'#3b82f6', hand: state.hands.gm };
   } else if (state.hands.gm && !state.hands.gm.hand) {
     state.hands.gm.hand = [];
   }
+  if (!state.chat) state.chat = [];
+  if (state.gmNotes === undefined) state.gmNotes = '';
 }
 function normalizeZ(state) {
   // Re-sequence all card/figurine z values to small ints, preserving visual order.
@@ -154,8 +213,10 @@ function newState(playerCount) {
     decks, discards,
     table: { cards: [], figurines: [], drawings: [] },
     hands,
-    assetMeta: {},   // hash -> { kind, size }
+    assetMeta: {},
     log: [],
+    chat: [],
+    gmNotes: '',
   };
 }
 
@@ -164,12 +225,13 @@ function viewFor(playerId) {
   const s = STATE;
   const view = JSON.parse(JSON.stringify({
     roomCode: s.roomCode, playerCount: s.playerCount,
-    decks: Object.fromEntries(Object.entries(s.decks).map(([k,v])=>[k,v.length])), // counts only
+    decks: Object.fromEntries(Object.entries(s.decks).map(([k,v])=>[k,v.length])),
     discards: s.discards,
     table: s.table,
     hands: {},
     assetMeta: s.assetMeta,
     log: s.log,
+    chat: s.chat || [],
   }));
   for (const [pid, p] of Object.entries(s.hands)) {
     if (pid === 'gm') continue; // never send GM hand to players
@@ -420,10 +482,12 @@ function handleFromPlayer(conn, data) {
 function handleFromGM(data) {
   if (['asset-begin','asset-chunk','asset-end'].includes(data.type)) return handleAssetMessage(data, connections.gm);
   if (data.type === 'state') {
+
     LOCAL_VIEW = data.view;
     if (data.myId) MY_ID = data.myId;
     rerenderAll();
     requestMissingAssets(LOCAL_VIEW.assetMeta);
+    renderChatPanel();
     return;
   }
   if (data.type === 'cursor-update') {
@@ -643,6 +707,39 @@ function applyOp(op, by) {
       s.table.drawings = s.table.drawings.filter(d => d.id !== op.id);
       break;
     }
+    case 'set-group': {
+      const ids = op.instIds || [];
+      const gid = op.groupId || null;
+      for (const id of ids) {
+        const f = s.table.figurines.find(x => x.instId === id);
+        if (f) { if (gid) f.groupId = gid; else delete f.groupId; }
+        const c = s.table.cards.find(x => x.instId === id);
+        if (c) { if (gid) c.groupId = gid; else delete c.groupId; }
+      }
+      break;
+    }
+    case 'send-chat': {
+      if (!s.chat) s.chat = [];
+      s.chat.push({ who: op.who, text: op.text, color: op.color || 'var(--text)', ts: op.ts || Date.now() });
+      if (s.chat.length > 200) s.chat.splice(0, s.chat.length - 200);
+      // Don't rerenderAll for chat — just update the chat panel
+      broadcast({ type:'state' });
+      renderAllGM();
+      autosave();
+      return;
+    }
+    case 'set-figurine-vitals': {
+      const f = s.table.figurines.find(x => x.instId === op.instId); if (!f) break;
+      if (op.hp  !== undefined) f.hp   = op.hp;
+      if (op.armor !== undefined) f.armor = op.armor;
+      break;
+    }
+    case 'set-gm-notes': {
+      s.gmNotes = op.text || '';
+      // GM notes are local — no broadcast needed, but we autosave
+      autosave();
+      return;
+    }
   }
   broadcast({ type:'state' });
   renderAllGM();
@@ -703,10 +800,10 @@ function rerenderAll() {
   });
 }
 function renderAllGM() {
-  renderTopbar(); renderTable(); renderRightRail(); renderLog();
+  renderTopbar(); renderTable(); renderRightRail(); renderLog(); renderChatPanel();
 }
 function renderAllPlayer() {
-  renderTopbarPlayer(); renderTable(); renderRightRailPlayer(); renderLog();
+  renderTopbarPlayer(); renderTable(); renderRightRailPlayer(); renderLog(); renderChatPanel();
 }
 
 function renderTopbar() {
@@ -777,7 +874,7 @@ function renderTableCards() {
   layer.innerHTML = '';
   for (const c of s.table.cards) {
     const card = CARDS_BY_ID[c.cardId];
-    const div = el('div', { class:'placed-card' + (c.locked?' locked':'') + (selectionSet.has(c.instId)?' selected':''), style:{ left:c.x+'px', top:c.y+'px', transform:`rotate(${c.rot||0}deg)`, zIndex:c.z||1 }, 'data-inst-id': c.instId });
+    const div = el('div', { class:'placed-card' + (c.locked?' locked':'') + (selectionSet.has(c.instId)?' selected':'') + (c.groupId?' grouped':''), style:{ left:c.x+'px', top:c.y+'px', transform:`rotate(${c.rot||0}deg)`, zIndex:c.z||1 }, 'data-inst-id': c.instId });
     div.appendChild(el('img', { class:'card-img', src: c.faceUp ? card.image : card.back, draggable:'false' }));
     if (c.locked) div.appendChild(el('div', { class:'figurine-lock-icon', title:'Locked by GM' }, '🔒'));
     if (!c.locked) {
@@ -801,7 +898,7 @@ function renderFigurines() {
       charPlayer = s.hands[f.playerId];
       const pfpHash = charPlayer?.pfpHash;
       url = pfpHash ? ASSETS[pfpHash] : null;
-      ringColor = charPlayer?.color || '#3b82f6';
+      ringColor = charPlayer?.color || '#f2ca50';
     } else {
       // Uploaded assets first; fall back to built-in token library (no transfer needed)
       url = ASSETS[f.assetHash] || TOKENS_BY_ID[f.assetHash]?.image;
@@ -816,7 +913,8 @@ function renderFigurines() {
       + (isChar ? ' character' : '')
       + (eff.sneaking ? ' sneaking' : '')
       + (eff.down ? ' downed' : '')
-      + (selectionSet.has(f.instId) ? ' selected' : '');
+      + (selectionSet.has(f.instId) ? ' selected' : '')
+      + (f.groupId ? ' grouped' : '');
     const style = { left:f.x+'px', top:f.y+'px', width:f.w+'px', height:f.h+'px', transform:tf, zIndex:f.z||1, opacity };
     if (isChar) style.borderColor = ringColor;
     const div = el('div', { class:classes, style, 'data-inst-id': f.instId });
@@ -827,6 +925,27 @@ function renderFigurines() {
       div.appendChild(tag);
     } else if (f.label) {
       div.appendChild(el('div', { class:'figurine-label' }, f.label));
+    }
+    // HP / Armor vitals bars — non-character tokens use f.hp / f.armor; character tokens use player sheet
+    const hp    = isChar ? charPlayer?.hp    : f.hp;
+    const armor = isChar ? charPlayer?.armor : f.armor;
+    if (hp) {
+      const vitalsDiv = el('div', { class:'fig-vitals' });
+      const hpPct = Math.max(0, Math.min(100, hp.max > 0 ? (hp.current / hp.max) * 100 : 100));
+      const hpWrap = el('div', { class:'fig-bar-wrap', style:{ width: Math.max(f.w, 48) + 'px' } });
+      hpWrap.appendChild(el('div', { class:'fig-bar-hp', style:{ width: hpPct + '%' } }));
+      vitalsDiv.appendChild(hpWrap);
+      if (armor && armor.current > 0) {
+        const arPct = Math.max(0, Math.min(100, armor.max > 0 ? (armor.current / armor.max) * 100 : 100));
+        const arWrap = el('div', { class:'fig-bar-wrap', style:{ width: Math.max(f.w, 48) + 'px' } });
+        arWrap.appendChild(el('div', { class:'fig-bar-armor', style:{ width: arPct + '%' } }));
+        vitalsDiv.appendChild(arWrap);
+      }
+      div.appendChild(vitalsDiv);
+      // Skull overlay when HP is 0
+      if (hp.current <= 0) {
+        div.appendChild(el('div', { class:'fig-skull' }, '💀'));
+      }
     }
     // Effect badges (skip on non-characters too — generic tokens can carry effects)
     const badges = [];
@@ -851,16 +970,17 @@ function renderFigurines() {
       handle.addEventListener('mousedown', e => {
         e.stopPropagation(); e.preventDefault();
         const startX = e.clientX, startY = e.clientY, w0 = f.w, h0 = f.h;
+        const size0 = Math.max(w0, h0);
         const onMove = ev => {
-          const nw = Math.max(40, w0 + (ev.clientX - startX) / tableZoom);
-          const nh = Math.max(40, h0 + (ev.clientY - startY) / tableZoom);
-          div.style.width = nw+'px'; div.style.height = nh+'px';
+          const delta = ((ev.clientX - startX) + (ev.clientY - startY)) / 2 / tableZoom;
+          const ns = Math.max(40, size0 + delta);
+          div.style.width = ns+'px'; div.style.height = ns+'px';
         };
-        const onUp = ev => {
+        const onUp = () => {
           window.removeEventListener('mousemove', onMove);
           window.removeEventListener('mouseup', onUp);
-          const nw = parseInt(div.style.width,10), nh = parseInt(div.style.height,10);
-          sendOp({ type:'move-figurine', instId:f.instId, w:nw, h:nh });
+          const ns = parseInt(div.style.width, 10);
+          sendOp({ type:'move-figurine', instId:f.instId, w:ns, h:ns });
         };
         window.addEventListener('mousemove', onMove);
         window.addEventListener('mouseup', onUp);
@@ -918,6 +1038,23 @@ function renderRightRail() {
   const s = activeState(); if (!s) return;
   const rail = $('#rightRail'); if (!rail) return;
   rail.innerHTML = '';
+  // GM private notes (GM only)
+  if (ROLE === 'gm') {
+    const notes = el('details', { id:'gmNotesPanel' });
+    const summary = el('summary', {}, 'GM Notes');
+    const ta = el('textarea', { placeholder:'Private notes (not visible to players)…', rows:'5' }, s.gmNotes || '');
+    let notesTimer = null;
+    ta.addEventListener('input', () => {
+      clearTimeout(notesTimer);
+      notesTimer = setTimeout(() => {
+        STATE.gmNotes = ta.value;
+        autosave();
+      }, 500);
+    });
+    notes.appendChild(summary);
+    notes.appendChild(ta);
+    rail.appendChild(notes);
+  }
   // GM hand tab
   rail.appendChild(playerPanel('gm', s.hands.gm));
   for (let i=1;i<=s.playerCount;i++) {
@@ -949,15 +1086,21 @@ function playerPanel(pid, p, isSelfOrEditable) {
   const expanded = expandedPanels.has(pid);
   const panel = el('div', { class:'player-panel' + (expanded?' expanded':'') });
   // header
-  const header = el('div', { class:'player-header', style:{ borderColor: p.color || '#3b82f6' }});
+  const header = el('div', { class:'player-header', style:{ borderColor: p.color || 'var(--accent)' }});
   const pfp = el('div', { class:'pfp' });
   if (p.pfpHash && ASSETS[p.pfpHash]) pfp.style.backgroundImage = 'url('+ASSETS[p.pfpHash]+')';
   header.appendChild(pfp);
   header.appendChild(el('div', { class:'player-name' }, p.name || (pid==='gm'?'GM':pid)));
   if (pid !== 'gm' && p.hp && p.armor) {
     const vitals = el('div', { class:'header-vitals' });
-    vitals.appendChild(el('span', { class:'mini-hp', title:'HP' }, `♥ ${p.hp.current}/${p.hp.max}`));
-    vitals.appendChild(el('span', { class:'mini-armor', title:'Armor' }, `🛡 ${p.armor.current}/${p.armor.max}`));
+    const hpMed = el('div', { class:'stat-medallion hp', title:`HP ${p.hp.current}/${p.hp.max}` });
+    hpMed.appendChild(el('div', { class:'stat-medallion-val' }, String(p.hp.current ?? '—')));
+    hpMed.appendChild(el('div', { class:'stat-medallion-lbl' }, 'HP'));
+    vitals.appendChild(hpMed);
+    const arMed = el('div', { class:'stat-medallion armor', title:`Armor ${p.armor.current}/${p.armor.max}` });
+    arMed.appendChild(el('div', { class:'stat-medallion-val' }, String(p.armor.current ?? '—')));
+    arMed.appendChild(el('div', { class:'stat-medallion-lbl' }, 'AC'));
+    vitals.appendChild(arMed);
     header.appendChild(vitals);
   }
   header.addEventListener('click', () => {
@@ -990,8 +1133,8 @@ function playerPanel(pid, p, isSelfOrEditable) {
   body.appendChild(infoRow);
   // HP / Armor
   const vitalRow = el('div', { class:'row' });
-  vitalRow.appendChild(vitalBar('HP', p.hp, 'hp', '#ef4444', editable, pid));
-  vitalRow.appendChild(vitalBar('Armor', p.armor, 'armor', '#3b82f6', editable, pid));
+  vitalRow.appendChild(vitalBar('HP', p.hp, 'hp', '#ffb4a8', editable, pid));
+  vitalRow.appendChild(vitalBar('Armor', p.armor, 'armor', '#c3cee5', editable, pid));
   body.appendChild(vitalRow);
   // Stats
   const statRow = el('div', { class:'stat-grid' });
@@ -1182,6 +1325,10 @@ function showDeckContextMenu(deckType, e) {
   ], e.clientX, e.clientY);
 }
 function showCardContextMenu(info, e) {
+  // Auto-expand selection to the whole group when right-clicking a grouped item
+  if (info.where === 'table' && info.instId && !selectionSet.has(info.instId)) {
+    if (selectWholeGroup(info.instId)) rerenderAll();
+  }
   const items = [];
   if (info.where === 'table' && selectionSet.size > 1 && selectionSet.has(info.instId)) {
     const n = selectionSet.size;
@@ -1196,7 +1343,30 @@ function showCardContextMenu(info, e) {
       selectionSet.clear();
     }});
     items.push({ label: `✕ Deselect all`, action: () => { selectionSet.clear(); rerenderAll(); }});
+    // Make Group / Ungroup
+    const ids = [...selectionSet];
+    const firstGid = getGroupIdOf(ids[0]);
+    const allSameGroup = firstGid && ids.every(id => getGroupIdOf(id) === firstGid);
+    if (allSameGroup) {
+      items.push({ label: `🔓 Ungroup`, action: () => {
+        sendOp({ type:'set-group', instIds: getGroupMembers(firstGid), groupId: null });
+      }});
+    } else {
+      items.push({ label: `🔗 Make Group`, action: () => {
+        sendOp({ type:'set-group', instIds: ids, groupId: uid() });
+      }});
+    }
     items.push('-');
+  }
+  // Ungroup option for a single right-clicked grouped item
+  if (info.where === 'table' && selectionSet.size <= 1) {
+    const gid = getGroupIdOf(info.instId);
+    if (gid) {
+      items.push({ label: `🔓 Ungroup`, action: () => {
+        sendOp({ type:'set-group', instIds: getGroupMembers(gid), groupId: null });
+      }});
+      items.push('-');
+    }
   }
   items.push(
     { label: info.faceUp ? 'Flip face-down' : 'Flip face-up', action: () => sendOp({ type:'flip-card', where:info.where, owner:info.owner, instId:info.instId }) },
@@ -1243,6 +1413,10 @@ const STATUS_EFFECTS = [
   ['down',      '💀 Down'],
 ];
 function showFigurineContextMenu(f, e) {
+  // Auto-expand selection to the whole group when right-clicking a grouped item
+  if (!selectionSet.has(f.instId)) {
+    if (selectWholeGroup(f.instId)) rerenderAll();
+  }
   const eff = f.effects || {};
   const items = [];
   // Group actions when multiple items are selected
@@ -1266,6 +1440,24 @@ function showFigurineContextMenu(f, e) {
       }
     }});
     items.push({ label: `✕ Deselect all`, action: () => { selectionSet.clear(); rerenderAll(); }});
+    // Make Group / Ungroup
+    const ids = [...selectionSet];
+    const firstGid = getGroupIdOf(ids[0]);
+    const allSameGroup = firstGid && ids.every(id => getGroupIdOf(id) === firstGid);
+    if (allSameGroup) {
+      items.push({ label: `🔓 Ungroup`, action: () => {
+        sendOp({ type:'set-group', instIds: getGroupMembers(firstGid), groupId: null });
+      }});
+    } else {
+      items.push({ label: `🔗 Make Group`, action: () => {
+        sendOp({ type:'set-group', instIds: ids, groupId: uid() });
+      }});
+    }
+    items.push('-');
+  } else if (f.groupId) {
+    items.push({ label: `🔓 Ungroup`, action: () => {
+      sendOp({ type:'set-group', instIds: getGroupMembers(f.groupId), groupId: null });
+    }});
     items.push('-');
   }
   items.push(
@@ -1274,6 +1466,7 @@ function showFigurineContextMenu(f, e) {
         const v = prompt('Label (blank to clear):', f.label || '');
         if (v != null) sendOp({ type:'set-figurine-label', instId:f.instId, label: v });
       } },
+    { label:'❤ Edit HP / Armor...', action: () => showTokenDetailPopup(f, e) },
     '-',
     // Status effects — toggle each.
     ...STATUS_EFFECTS.map(([key, label]) => ({
@@ -1340,6 +1533,30 @@ function showOpacitySlider(f, x, y) {
   document.body.appendChild(popup);
 }
 
+// =================== Group helpers ===================
+function getGroupIdOf(instId) {
+  const s = activeState(); if (!s) return null;
+  const f = s.table.figurines.find(x => x.instId === instId);
+  if (f && f.groupId) return f.groupId;
+  const c = s.table.cards.find(x => x.instId === instId);
+  if (c && c.groupId) return c.groupId;
+  return null;
+}
+function getGroupMembers(groupId) {
+  const s = activeState(); if (!s || !groupId) return [];
+  const ids = [];
+  for (const f of s.table.figurines) if (f.groupId === groupId) ids.push(f.instId);
+  for (const c of s.table.cards)     if (c.groupId === groupId) ids.push(c.instId);
+  return ids;
+}
+function selectWholeGroup(instId) {
+  const gid = getGroupIdOf(instId);
+  if (!gid) return false;
+  selectionSet.clear();
+  for (const id of getGroupMembers(gid)) selectionSet.add(id);
+  return true;
+}
+
 // =================== Drag helper ===================
 // instId (optional): enables Ctrl+click selection and group drag.
 function makeDraggable(elm, onEnd, instId) {
@@ -1359,8 +1576,11 @@ function makeDraggable(elm, onEnd, instId) {
       return;
     }
 
-    // Regular click on an item not in the selection → clear selection
-    if (instId && !selectionSet.has(instId)) selectionSet.clear();
+    // Grouped item → select the whole group on plain click
+    if (instId && !selectionSet.has(instId)) {
+      if (!selectWholeGroup(instId)) selectionSet.clear();
+      rerenderAll();
+    }
 
     e.preventDefault();
     const startX = e.clientX, startY = e.clientY;
@@ -1504,8 +1724,6 @@ function setupTableInteraction() {
     tablePanY = my - (my - tablePanY) * (newZoom / tableZoom);
     tableZoom = newZoom;
     applyTableTransform();
-    const sl = $('#zoomSlider');
-    if (sl) sl.value = String(Math.round(tableZoom * 100) / 100);
   }, { passive: false });
 
   stage.addEventListener('mousemove', e => {
@@ -1830,6 +2048,9 @@ async function boot() {
   setupFloatingPanels();
   setupAltPreview();
   setupLogToggle();
+  setupChatUI();
+  // Load tokens in background so placed tokens render after session restore
+  ensureTokens().then(() => { if (activeState()) renderTable(); });
   if (ROLE === 'gm') gmSetupFlow();
   else playerJoinFlow();
 }
@@ -1872,14 +2093,15 @@ function setupLogToggle() {
   const overlay = $('#logOverlay'); if (!overlay) return;
   const header = el('div', { id:'logHeader' });
   header.appendChild(el('span', {}, 'Log & Dice'));
-  const btn = el('button', { class:'log-toggle', title:'Toggle log' }, '▾');
+  const btn = el('button', { class:'log-toggle', title:'Toggle log' });
+  btn.appendChild(icon('chevron-down'));
   header.appendChild(btn);
   overlay.insertBefore(header, overlay.firstChild);
   let collapsed = false;
   btn.addEventListener('click', () => {
     collapsed = !collapsed;
     overlay.classList.toggle('collapsed', collapsed);
-    btn.textContent = collapsed ? '▴' : '▾';
+    btn.replaceChildren(icon(collapsed ? 'chevron-up' : 'chevron-down'));
   });
 }
 
@@ -1949,7 +2171,7 @@ function openTokenPanel() {
 
   // Header
   const hdr = el('div', { class: 'token-header' });
-  hdr.appendChild(el('span', {}, '🎭 D&D Token Collection'));
+  hdr.appendChild(el('span', {}, 'D&D Token Collection'));
   const searchI = el('input', { type: 'text', placeholder: 'Search by name or category…', class: 'token-search' });
   hdr.appendChild(searchI);
   hdr.appendChild(el('button', { class: 'mini', onclick: () => overlay.remove() }, '×'));
@@ -1962,6 +2184,17 @@ function openTokenPanel() {
 
   // Close on backdrop click
   overlay.addEventListener('click', e => { if (e.target === overlay) overlay.remove(); });
+
+  // Show loading spinner until tokens are parsed
+  if (!_tokensLoaded) {
+    content.appendChild(el('div', { class: 'token-empty' }, 'Loading tokens… (first open only)'));
+    ensureTokens().then(() => {
+      content.innerHTML = '';
+      render(searchI.value);
+    });
+    searchI.addEventListener('input', () => { if (_tokensLoaded) render(searchI.value); });
+    return;
+  }
 
   function addTokenToTable(t) {
     const stage = $('#tableStage');
@@ -1982,7 +2215,7 @@ function openTokenPanel() {
   function buildTree() {
     // tree[cat][subcat|'_root'] = [tokens]
     const tree = {};
-    for (const t of TOKENS) {
+    for (const t of Object.values(TOKENS_BY_ID)) {
       const cat = t.cats[0] || 'Uncategorized';
       const sub = t.cats[1] || '_root';
       if (!tree[cat]) tree[cat] = {};
@@ -2008,7 +2241,7 @@ function openTokenPanel() {
 
     if (query) {
       // Flat filtered results
-      const hits = TOKENS.filter(t =>
+      const hits = Object.values(TOKENS_BY_ID).filter(t =>
         t.name.toLowerCase().includes(query) ||
         t.cats.join(' ').toLowerCase().includes(query)
       );
@@ -2068,91 +2301,106 @@ function openTokenPanel() {
 
 function setupToolbarUI() {
   const tb = $('#toolbar'); if (!tb) return;
+  const TOOL_ICON = { pointer:'pointer', pen:'pen', eraser:'eraser' };
   for (const t of ['pointer','pen','eraser']) {
-    tb.appendChild(el('button', { class:'tool-btn'+(t==='pointer'?' active':''), 'data-tool':t, onclick: () => setTool(t) }, t));
+    const b = el('button', { class:'tool-btn'+(t==='pointer'?' active':''), 'data-tool':t, title:t, onclick: () => setTool(t) });
+    b.appendChild(icon(TOOL_ICON[t]));
+    tb.appendChild(b);
   }
-  const colorI = el('input', { type:'color', value: currentColor });
+  const colorI = el('input', { type:'color', value: currentColor, title:'Pen color', style:{width:'28px',height:'28px',padding:'0',cursor:'pointer'} });
   colorI.addEventListener('change', e => currentColor = e.target.value);
   tb.appendChild(colorI);
-  // Zoom slider
-  const zoomSlider = el('input', { id:'zoomSlider', type:'range', min:'0.2', max:'4', step:'0.05', value:'1', title:'Zoom (scroll wheel also works)', style:{width:'70px', cursor:'pointer'} });
-  zoomSlider.addEventListener('input', e => {
-    tableZoom = parseFloat(e.target.value);
-    applyTableTransform();
-  });
-  tb.appendChild(zoomSlider);
-  tb.appendChild(el('button', { class:'tool-btn', title:'Reset pan & zoom', onclick: () => {
+  const resetBtn = el('button', { class:'tool-btn', title:'Reset pan & zoom', onclick: () => {
     tableZoom = 1; tablePanX = 0; tablePanY = 0;
     applyTableTransform();
-    zoomSlider.value = '1';
-  }}, '⌖'));
-  // Panel toggle buttons
-  tb.appendChild(el('button', { class:'tool-btn', title:'Toggle deck panel', onclick: () => {
-    const p = $('#deckPanel'); if (p) p.style.display = p.style.display === 'none' ? '' : 'none';
-  }}, '📚'));
-  tb.appendChild(el('button', { class:'tool-btn', title:'Toggle discard panel', onclick: () => {
-    const p = $('#discardPanel'); if (p) p.style.display = p.style.display === 'none' ? '' : 'none';
-  }}, '🗑'));
+  }});
+  resetBtn.appendChild(icon('target'));
+  tb.appendChild(resetBtn);
   // Token library panel
-  tb.appendChild(el('button', { class:'tool-btn', title:'Browse & add D&D tokens', onclick: () => openTokenPanel() }, '🎭 Tokens'));
+  const tokenLibBtn = el('button', { class:'tool-btn', title:'Browse & add D&D tokens', onclick: () => openTokenPanel() });
+  tokenLibBtn.appendChild(icon('tokens'));
+  tokenLibBtn.appendChild(el('span', {}, 'Tokens'));
+  tb.appendChild(tokenLibBtn);
   // Map + Token uploads — available to everyone.
-  const mapBtn = el('label', { class:'tool-btn' }, '+ Add Map');
+  const mapBtn = el('label', { class:'tool-btn', title:'Upload a battle map' });
+  mapBtn.appendChild(icon('map'));
+  mapBtn.appendChild(el('span', {}, 'Map'));
   const mapI = el('input', { type:'file', accept:'image/*', style:{display:'none'}});
   mapI.addEventListener('change', e => { uploadFigurine(e.target.files[0], 'map'); mapI.value=''; });
   mapBtn.appendChild(mapI); tb.appendChild(mapBtn);
-  const tokenBtn = el('label', { class:'tool-btn' }, '+ Add Token');
+  const tokenBtn = el('label', { class:'tool-btn', title:'Upload a custom token' });
+  tokenBtn.appendChild(icon('plus'));
+  tokenBtn.appendChild(el('span', {}, 'Token'));
   const tokenI = el('input', { type:'file', accept:'image/*', style:{display:'none'}});
   tokenI.addEventListener('change', e => { uploadFigurine(e.target.files[0], 'figurine'); tokenI.value=''; });
   tokenBtn.appendChild(tokenI); tb.appendChild(tokenBtn);
   if (ROLE === 'gm') {
-    tb.appendChild(el('button', { onclick: () => sendOp({ type:'clear-drawings' }) }, 'Clear drawings'));
-    const searchBtn = el('button', { onclick: () => openSearch() }, 'Search cards');
+    const clrBtn = el('button', { class:'tool-btn', title:'Clear all drawings', onclick: () => sendOp({ type:'clear-drawings' }) });
+    clrBtn.appendChild(icon('eraser'));
+    clrBtn.appendChild(el('span', {}, 'Clear'));
+    tb.appendChild(clrBtn);
+    const searchBtn = el('button', { class:'tool-btn', title:'Search cards', onclick: () => openSearch() });
+    searchBtn.appendChild(icon('search'));
+    searchBtn.appendChild(el('span', {}, 'Search'));
     tb.appendChild(searchBtn);
   } else {
-    tb.appendChild(el('button', { onclick: () => sendOp({ type:'undo-drawing', by: MY_ID }) }, 'Undo my last'));
+    const undoBtn = el('button', { class:'tool-btn', title:'Undo my last stroke', onclick: () => sendOp({ type:'undo-drawing', by: MY_ID }) });
+    undoBtn.appendChild(icon('refresh'));
+    undoBtn.appendChild(el('span', {}, 'Undo'));
+    tb.appendChild(undoBtn);
   }
 }
 
-// =================== Movable / toggleable floating panels ===================
-function makePanelDraggable(panel, handle) {
-  handle.style.cursor = 'grab';
-  handle.addEventListener('mousedown', e => {
-    if (e.button !== 0) return;
-    e.preventDefault(); e.stopPropagation();
-    const stage = $('#tableStage') || panel.offsetParent;
-    const sr = stage.getBoundingClientRect();
-    const pr = panel.getBoundingClientRect();
-    const x0 = pr.left - sr.left, y0 = pr.top - sr.top;
-    // Freeze right-based positioning before dragging
-    panel.style.right = 'auto';
-    panel.style.left = x0 + 'px';
-    panel.style.top  = y0 + 'px';
-    const startX = e.clientX, startY = e.clientY;
-    handle.style.cursor = 'grabbing';
-    const onMove = ev => {
-      panel.style.left = (x0 + ev.clientX - startX) + 'px';
-      panel.style.top  = (y0 + ev.clientY - startY) + 'px';
-    };
-    const onUp = () => {
-      window.removeEventListener('mousemove', onMove);
-      window.removeEventListener('mouseup', onUp);
-      handle.style.cursor = 'grab';
-    };
-    window.addEventListener('mousemove', onMove);
-    window.addEventListener('mouseup', onUp);
+// =================== Slide-toggle floating panels ===================
+function setupSlidePanel(panelId, tabId) {
+  const panel = $('#' + panelId);
+  const tab   = $('#' + tabId);
+  if (!panel || !tab) return;
+  const hideBtn = panel.querySelector('.panel-hide-btn');
+  const collapse = () => { panel.classList.add('collapsed'); tab.style.display = 'block'; };
+  const expand   = () => { panel.classList.remove('collapsed'); tab.style.display = 'none'; };
+  if (hideBtn) hideBtn.addEventListener('click', collapse);
+  tab.addEventListener('click', expand);
+}
+
+function setupRailToggle() {
+  const rail = $('#rightRail');
+  const tab  = $('#railTab');
+  if (!rail || !tab) return;
+  let collapsed = false;
+  const update = () => {
+    rail.classList.toggle('collapsed', collapsed);
+    tab.replaceChildren(icon(collapsed ? 'chevron-left' : 'chevron-right'));
+    tab.style.right = collapsed ? '0px' : '340px';
+    tab.title = collapsed ? 'Show players panel' : 'Hide players panel';
+  };
+  tab.addEventListener('click', () => { collapsed = !collapsed; update(); });
+  update();
+}
+
+function setupToolbarToggle() {
+  const toolbar = $('#toolbar');
+  const tab     = $('#toolbarTab');
+  if (!toolbar || !tab) return;
+  const hideBtn = el('button', { class:'tool-btn', title:'Hide toolbar' });
+  hideBtn.appendChild(icon('chevron-up'));
+  hideBtn.addEventListener('click', () => {
+    toolbar.classList.add('collapsed');
+    tab.style.display = 'block';
+  });
+  toolbar.appendChild(hideBtn);
+  tab.addEventListener('click', () => {
+    toolbar.classList.remove('collapsed');
+    tab.style.display = 'none';
   });
 }
 
 function setupFloatingPanels() {
-  for (const id of ['deckPanel', 'discardPanel']) {
-    const panel  = $('#' + id);
-    const handle = panel?.querySelector('.panel-handle');
-    if (!panel || !handle) continue;
-    makePanelDraggable(panel, handle);
-    // Hide button
-    const hideBtn = handle.querySelector('.panel-hide-btn');
-    if (hideBtn) hideBtn.addEventListener('click', () => { panel.style.display = 'none'; });
-  }
+  paintStaticIcons();
+  setupSlidePanel('deckPanel', 'deckTab');
+  setupSlidePanel('discardPanel', 'discardTab');
+  setupRailToggle();
+  setupToolbarToggle();
   // Make log overlay draggable from its header
   const logOverlay = $('#logOverlay');
   const logHeader  = $('#logHeader');
@@ -2179,6 +2427,100 @@ function setupFloatingPanels() {
       window.addEventListener('mouseup', onUp);
     });
   }
+}
+
+// =================== Chat panel ===================
+function setupChatUI() {
+  const overlay = $('#chatOverlay'); if (!overlay) return;
+  // Collapse toggle
+  const toggle = $('#chatToggle');
+  if (toggle) {
+    toggle.appendChild(icon('chevron-down'));
+    let collapsed = false;
+    toggle.addEventListener('click', () => {
+      collapsed = !collapsed;
+      overlay.classList.toggle('collapsed', collapsed);
+      toggle.replaceChildren(icon(collapsed ? 'chevron-up' : 'chevron-down'));
+    });
+  }
+  // Send on Enter or button click
+  const input = $('#chatInputField');
+  const sendBtn = $('#chatSendBtn');
+  const doSend = () => {
+    const text = input?.value?.trim();
+    if (!text) return;
+    const who = (ROLE === 'gm') ? (STATE?.hands?.gm?.name || 'GM') : MY_NAME;
+    const color = (ROLE === 'gm') ? (STATE?.hands?.gm?.color || '#f2ca50') : MY_COLOR;
+    sendOp({ type: 'send-chat', who, text, color, ts: Date.now() });
+    if (input) input.value = '';
+  };
+  if (input) input.addEventListener('keydown', e => { if (e.key === 'Enter') { e.preventDefault(); doSend(); } });
+  if (sendBtn) sendBtn.addEventListener('click', doSend);
+}
+
+function renderChatPanel() {
+  const s = activeState(); if (!s) return;
+  const container = $('#chatMessages'); if (!container) return;
+  const myWho = (ROLE === 'gm') ? (s.hands?.gm?.name || 'GM') : MY_NAME;
+  container.innerHTML = '';
+  for (const msg of (s.chat || [])) {
+    const isMe = msg.who === myWho;
+    const row = el('div', { class: 'chat-msg' + (isMe ? ' chat-msg-me' : '') });
+    const who = el('span', { class: 'chat-msg-who', style: { color: msg.color || 'var(--accent)' } }, msg.who + ': ');
+    const text = el('span', { class: 'chat-msg-text' }, msg.text);
+    row.appendChild(who);
+    row.appendChild(text);
+    container.appendChild(row);
+  }
+  container.scrollTop = container.scrollHeight;
+}
+
+// =================== Token detail popup ===================
+function showTokenDetailPopup(f, e) {
+  $$('.token-detail-popup').forEach(p => p.remove());
+  const isChar = f.kind === 'character';
+  const hp    = isChar ? activeState()?.hands?.[f.playerId]?.hp    : (f.hp || { current: 20, max: 20 });
+  const armor = isChar ? activeState()?.hands?.[f.playerId]?.armor : (f.armor || { current: 0, max: 10 });
+
+  const popup = el('div', { class: 'token-detail-popup', style: { left: e.clientX + 'px', top: e.clientY + 'px' } });
+  const closeBtn = el('button', { class: 'close-btn', onclick: () => popup.remove() }, '×');
+  popup.appendChild(closeBtn);
+  popup.appendChild(el('h4', {}, (f.label || f.kind || 'Token') + ' — Vitals'));
+
+  const makeRow = (labelText, cur, max, onChange) => {
+    const row = el('div', { class: 'token-detail-row' });
+    row.appendChild(el('label', {}, labelText));
+    const curI = el('input', { type:'number', value: String(cur), min:'0', style:{ width:'50px' } });
+    row.appendChild(curI);
+    row.appendChild(el('span', { style:{ color:'var(--muted)', margin:'0 4px' } }, '/'));
+    const maxI = el('input', { type:'number', value: String(max), min:'1', style:{ width:'50px' } });
+    row.appendChild(maxI);
+    const onChg = () => onChange(parseInt(curI.value,10)||0, parseInt(maxI.value,10)||1);
+    curI.addEventListener('change', onChg);
+    maxI.addEventListener('change', onChg);
+    return row;
+  };
+
+  if (isChar && f.playerId) {
+    popup.appendChild(makeRow('HP', hp.current, hp.max, (c, m) =>
+      sendOp({ type:'set-player-field', owner: f.playerId, path:'hp', value:{ current:c, max:m } })));
+    popup.appendChild(makeRow('Armor', armor.current, armor.max, (c, m) =>
+      sendOp({ type:'set-player-field', owner: f.playerId, path:'armor', value:{ current:c, max:m } })));
+  } else {
+    popup.appendChild(makeRow('HP', hp.current, hp.max, (c, m) =>
+      sendOp({ type:'set-figurine-vitals', instId: f.instId, hp:{ current:c, max:m } })));
+    popup.appendChild(makeRow('Armor', armor.current, armor.max, (c, m) =>
+      sendOp({ type:'set-figurine-vitals', instId: f.instId, armor:{ current:c, max:m } })));
+  }
+
+  document.body.appendChild(popup);
+  // Keep within viewport
+  const r = popup.getBoundingClientRect();
+  if (r.right  > window.innerWidth)  popup.style.left = (window.innerWidth  - r.width  - 8) + 'px';
+  if (r.bottom > window.innerHeight) popup.style.top  = (window.innerHeight - r.height - 8) + 'px';
+  // Close on outside click
+  const close = ev => { if (!popup.contains(ev.target)) { popup.remove(); document.removeEventListener('mousedown', close); } };
+  setTimeout(() => document.addEventListener('mousedown', close), 0);
 }
 
 window.addEventListener('DOMContentLoaded', boot);
