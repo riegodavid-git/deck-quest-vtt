@@ -222,65 +222,90 @@ function rollAndLog(spec) {
   }
 }
 
-// =================== PeerJS networking ===================
-let peer = null;
-let connections = {};    // GM: playerId -> DataConnection. Player: { gm: DataConnection }
+// =================== WebSocket relay networking ===================
+// ┌─────────────────────────────────────────────────────────────────┐
+// │  RELAY_URL — update this after deploying relay/server.js        │
+// │  to Render.com, then run  node build.js  to rebuild the HTMLs.  │
+// │  Example: 'wss://deck-quest-relay.onrender.com'                 │
+// └─────────────────────────────────────────────────────────────────┘
+const RELAY_URL = 'wss://YOUR-APP-NAME.onrender.com';
+
+let wsConn = null;
+let connections = {};    // GM: { slot: fakeConn }. Player: { gm: fakeConn }
 let cursorThrottle = 0;
 
-// ICE servers: Google STUN + OpenRelay free TURN.
-// TURN is needed when players are behind strict NAT / double-NAT (very common on
-// home networks). Without it WebRTC falls back to the broker relay which can fail.
-const ICE_SERVERS = [
-  { urls: 'stun:stun.l.google.com:19302' },
-  { urls: 'stun:stun1.l.google.com:19302' },
-  { urls: 'turn:openrelay.metered.ca:80',               username: 'openrelayproject', credential: 'openrelayproject' },
-  { urls: 'turn:openrelay.metered.ca:443',              username: 'openrelayproject', credential: 'openrelayproject' },
-  { urls: 'turn:openrelay.metered.ca:443?transport=tcp',username: 'openrelayproject', credential: 'openrelayproject' },
-];
-const PEER_CONFIG = { config: { iceServers: ICE_SERVERS } };
+// Lightweight fake-connection object so all existing broadcast/sendToGM
+// code continues to work without changes.
+function makeConn(slot) {
+  return {
+    _playerId: slot,
+    open: true,
+    close() { /* no-op; server handles teardown */ },
+    send(msg) {
+      if (wsConn && wsConn.readyState === WebSocket.OPEN) {
+        wsConn.send(JSON.stringify({ to: slot, msg }));
+      }
+    },
+  };
+}
 
 function setupPeerGM(roomCode) {
-  peer = new Peer(roomCode, { debug: 1, ...PEER_CONFIG });
-  peer.on('open', id => {
-    $('#connStatus').textContent = 'Hosting as ' + id;
-    $('#roomCode').textContent = id;
-  });
-  peer.on('error', err => {
-    console.error(err);
-    $('#connStatus').textContent = 'Peer error: ' + err.type;
-    if (err.type === 'unavailable-id') {
-      // room code taken — pick a new one
-      STATE.roomCode = randomRoom();
-      setupPeerGM(STATE.roomCode);
+  if (wsConn) wsConn.close();
+  wsConn = new WebSocket(RELAY_URL);
+  wsConn.onopen = () => {
+    wsConn.send(JSON.stringify({ type: 'register', room: roomCode, role: 'gm' }));
+    $('#connStatus').textContent = 'Hosting as ' + roomCode;
+    $('#roomCode').textContent = roomCode;
+  };
+  wsConn.onmessage = e => {
+    let data; try { data = JSON.parse(e.data); } catch { return; }
+    // Internal lifecycle: player WebSocket connected/disconnected
+    if (data.type === '_ws-connected') {
+      const slot = data.slot;
+      if (!connections[slot]) connections[slot] = makeConn(slot);
+      connections[slot].open = true;
+      return;
     }
-  });
-  peer.on('connection', conn => {
-    conn.on('open', () => {
-      conn.on('data', data => handleFromPlayer(conn, data));
-      conn.on('close', () => onPlayerDisconnect(conn));
-    });
-  });
+    if (data.type === '_ws-disconnected') {
+      const slot = data.slot;
+      onPlayerDisconnect(connections[slot] || { _playerId: slot });
+      return;
+    }
+    // Game message from a player: { from: slot, msg: {...} }
+    if (data.from) {
+      const slot = data.from;
+      if (!connections[slot]) connections[slot] = makeConn(slot);
+      handleFromPlayer(connections[slot], data.msg);
+    }
+  };
+  wsConn.onclose = () => { $('#connStatus').textContent = 'Relay: disconnected'; };
+  wsConn.onerror = () => { $('#connStatus').textContent = 'Cannot reach relay — check RELAY_URL in build'; };
 }
 
 function setupPeerPlayer(roomCode) {
-  peer = new Peer({ debug: 1, ...PEER_CONFIG });
-  peer.on('open', () => {
+  if (wsConn) wsConn.close();
+  wsConn = new WebSocket(RELAY_URL);
+  wsConn.onopen = () => {
+    wsConn.send(JSON.stringify({ type: 'register', room: roomCode, role: 'player', slot: MY_ID }));
+    connections.gm = makeConn('gm');
+    connections.gm.open = true;
     $('#connStatus').textContent = 'Connecting to ' + roomCode + '...';
-    const conn = peer.connect(roomCode, { reliable: true });
-    connections.gm = conn;
-    conn.on('open', () => {
-      $('#connStatus').textContent = 'Connected to ' + roomCode;
-      conn.send({ type: 'join', slot: MY_ID, name: MY_NAME, pfpHash: window._pendingPfpHash || null });
-      if (window._pendingPfp) {
-        // send the pfp asset to GM
-        sendAsset(conn, window._pendingPfpHash, window._pendingPfp, 'pfp');
-        delete window._pendingPfp;
-      }
-    });
-    conn.on('data', data => handleFromGM(data));
-    conn.on('close', () => { $('#connStatus').textContent = 'GM offline'; });
-  });
-  peer.on('error', err => { $('#connStatus').textContent = 'Peer error: ' + err.type; });
+    connections.gm.send({ type: 'join', slot: MY_ID, name: MY_NAME, pfpHash: window._pendingPfpHash || null });
+    if (window._pendingPfp) {
+      sendAsset(connections.gm, window._pendingPfpHash, window._pendingPfp, 'pfp');
+      delete window._pendingPfp;
+    }
+    $('#connStatus').textContent = 'Connected to ' + roomCode;
+  };
+  wsConn.onmessage = e => {
+    let data; try { data = JSON.parse(e.data); } catch { return; }
+    handleFromGM(data);
+  };
+  wsConn.onclose = () => {
+    $('#connStatus').textContent = 'GM offline';
+    if (connections.gm) connections.gm.open = false;
+  };
+  wsConn.onerror = () => { $('#connStatus').textContent = 'Cannot reach relay — check RELAY_URL in build'; };
 }
 
 // ---- Chunked asset transfer ----
@@ -346,11 +371,10 @@ function handleFromPlayer(conn, data) {
       conn.send({ type:'join-rejected', reason:'No such slot.' });
       conn.close(); return;
     }
-    // Reject if slot is already held by a different live connection.
-    const existing = connections[slot];
-    if (existing && existing.open && existing !== conn) {
+    // Reject if slot is already held by a live player.
+    if (STATE.hands[slot].connected) {
       conn.send({ type:'join-rejected', reason:`Slot already taken by ${STATE.hands[slot].name || slot}.` });
-      conn.close(); return;
+      return;
     }
     connections[slot] = conn;
     conn._playerId = slot;
@@ -1813,7 +1837,7 @@ window._newSession = () => {
   if (!confirm('Start a new session? Current session will be discarded from autosave.')) return;
   const pc = parseInt(prompt('Number of players (1-10)?', String(STATE.playerCount)), 10);
   STATE = newState(Math.max(1, Math.min(10, pc || 4)));
-  if (peer) peer.destroy();
+  if (wsConn) { wsConn.close(); wsConn = null; }
   setupPeerGM(STATE.roomCode);
   renderAllGM();
   autosave();
