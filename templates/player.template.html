@@ -1,0 +1,148 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Deck Quest — Player</title>
+<script src="https://unpkg.com/peerjs@1.5.4/dist/peerjs.min.js"></script>
+<style>
+:root { --bg:#0a1929; --panel:#0f2540; --panel2:#143258; --line:#1e3a5f; --text:#f5f7fa; --muted:#9bb1c9; --accent:#3b82f6; --danger:#ef4444; }
+* { box-sizing: border-box; }
+html, body { margin:0; padding:0; height:100%; background:var(--bg); color:var(--text); font-family: 'Segoe UI', system-ui, sans-serif; font-size:13px; overflow:hidden; }
+button { background:var(--panel2); color:var(--text); border:1px solid var(--line); padding:5px 10px; border-radius:4px; cursor:pointer; font-size:12px; }
+button:hover { background:var(--accent); border-color:var(--accent); }
+button.primary { background:var(--accent); padding:8px 16px; font-size:14px; margin-top:8px; }
+input, select { background:var(--panel); color:var(--text); border:1px solid var(--line); border-radius:3px; padding:3px 6px; font-size:12px; }
+input:focus, select:focus { outline:1px solid var(--accent); }
+
+#topbar { display:flex; align-items:center; gap:10px; padding:8px 14px; background:#000; border-bottom:1px solid var(--line); height:48px; }
+#topbar h1 { font-size:14px; margin:0; letter-spacing:1px; }
+.room-code { background:var(--panel); padding:4px 10px; border-radius:4px; font-family:ui-monospace,monospace; font-weight:bold; color:var(--accent); }
+.grow { flex:1; }
+
+#main { display:flex; height: calc(100vh - 48px); }
+#tableStage { flex:1; position:relative; background: radial-gradient(circle at center, #143258 0%, #0a1929 100%); overflow:hidden; }
+#deckStacks { position:absolute; top:60px; left:20px; display:flex; gap:10px; flex-direction:column; z-index:5; }
+#discardStacks { position:absolute; top:60px; right:20px; display:flex; gap:10px; flex-direction:column; z-index:5; }
+.deck-stack { width:100px; background:var(--panel); border:1px solid var(--line); border-radius:6px; padding:4px; }
+.deck-stack .card-img { width:100%; display:block; border-radius:3px; }
+.card-empty { width:100%; height:140px; background:#0a1929; border:1px dashed var(--line); border-radius:3px; display:flex; align-items:center; justify-content:center; color:var(--muted); font-size:11px; }
+.deck-label { font-size:10px; text-align:center; color:var(--muted); padding:3px 0 0; }
+
+#figurineLayer, #cardLayer, #cursorLayer { position:absolute; top:0; left:0; width:100%; height:100%; pointer-events:none; }
+#drawLayer { position:absolute; top:0; left:0; width:100%; height:100%; pointer-events:none; }
+#cursorLayer { z-index:1000; }
+
+.figurine { position:absolute; }
+.figurine-img { width:100%; height:100%; object-fit:contain; }
+.figurine-loading { width:100%; height:100%; display:flex; align-items:center; justify-content:center; background:var(--panel); color:var(--muted); }
+.figurine-label { position:absolute; bottom:-18px; left:0; right:0; text-align:center; font-size:11px; background:rgba(0,0,0,.6); padding:1px 4px; }
+.figurine-lock-icon { position:absolute; top:2px; right:2px; font-size:12px; background:rgba(0,0,0,.6); padding:1px 4px; border-radius:3px; pointer-events:none; }
+
+.placed-card { position:absolute; width:140px; }
+.placed-card .card-img { width:100%; display:block; border-radius:4px; box-shadow:0 4px 12px rgba(0,0,0,.5); }
+
+.cursor { position:absolute; pointer-events:none; transform:translate(-2px,-2px); }
+.cursor-arrow { width:18px; height:18px; border-radius:50%; border:2px solid #fff; background-size:cover; background-position:center; }
+.cursor-label { font-size:10px; background:rgba(0,0,0,.7); padding:1px 5px; border-radius:3px; margin-top:2px; white-space:nowrap; }
+
+#toolbar { position:absolute; top:10px; left:50%; transform:translateX(-50%); display:flex; gap:6px; background:rgba(0,0,0,.7); padding:6px 10px; border-radius:6px; z-index:2000000; pointer-events:auto; }
+.tool-btn { padding:4px 10px; }
+.tool-btn.active { background:var(--accent); border-color:var(--accent); }
+
+#rightRail { width:340px; background:var(--panel); border-left:1px solid var(--line); overflow-y:auto; padding:8px; display:flex; flex-direction:column; gap:8px; }
+.player-panel { background:var(--panel2); border:1px solid var(--line); border-radius:6px; overflow:hidden; }
+.player-header { display:flex; align-items:center; gap:8px; padding:6px 10px; border-left:3px solid var(--accent); cursor:pointer; background:rgba(0,0,0,.2); }
+.pfp { width:28px; height:28px; border-radius:50%; background:#000 center/cover; border:1px solid var(--line); }
+.player-name { font-weight:600; flex:1; }
+.header-vitals { display:flex; gap:6px; font-size:10px; }
+.mini-hp { background:rgba(239,68,68,.2); color:#fca5a5; padding:1px 5px; border-radius:3px; white-space:nowrap; }
+.mini-armor { background:rgba(59,130,246,.2); color:#93c5fd; padding:1px 5px; border-radius:3px; white-space:nowrap; }
+.player-body { padding:8px 10px; display:none; flex-direction:column; gap:8px; }
+.player-panel.expanded .player-body { display:flex; }
+.field { display:flex; flex-direction:column; gap:2px; flex:1; min-width:0; }
+.field label { font-size:10px; color:var(--muted); text-transform:uppercase; letter-spacing:.5px; }
+.field input { width:100%; }
+.field .val { padding:3px 6px; background:var(--panel); border-radius:3px; }
+.row { display:flex; gap:6px; }
+.vital { flex:1; }
+.vital label { display:block; font-size:10px; color:var(--muted); margin-bottom:2px; }
+.bar { background:var(--panel); height:8px; border-radius:4px; overflow:hidden; margin-bottom:2px; }
+.bar-fill { height:100%; transition:width .2s; }
+.vital-num { font-size:11px; }
+.stat-grid { display:grid; grid-template-columns: repeat(5,1fr); gap:4px; }
+.section-label { font-size:10px; color:var(--muted); text-transform:uppercase; letter-spacing:.5px; margin-top:4px; }
+.inventory { display:flex; flex-direction:column; gap:2px; }
+.inv-row { display:flex; justify-content:space-between; align-items:center; background:var(--panel); padding:3px 6px; border-radius:3px; font-size:11px; }
+.mini { padding:0 6px; font-size:14px; line-height:1; }
+.pfp-upload { background:var(--panel); padding:5px 8px; border-radius:4px; cursor:pointer; text-align:center; font-size:11px; }
+.pfp-upload:hover { background:var(--accent); }
+.hand-cards { display:flex; flex-wrap:wrap; gap:4px; }
+.hand-card { width:70px; cursor:pointer; transition:transform .1s; }
+.hand-card:hover { transform: translateY(-3px); }
+.hand-card .card-img { width:100%; display:block; border-radius:3px; box-shadow:0 2px 6px rgba(0,0,0,.5); }
+
+#logOverlay { position:fixed; bottom:0; left:0; width:380px; height:240px; background:rgba(0,0,0,.85); border-top:1px solid var(--line); border-right:1px solid var(--line); display:flex; flex-direction:column; z-index:100; }
+#diceRow { display:flex; gap:3px; padding:5px; border-bottom:1px solid var(--line); flex-wrap:wrap; }
+.die-btn { padding:3px 7px; font-size:11px; min-width:30px; }
+#logEntries { flex:1; overflow-y:auto; padding:5px 8px; font-size:11px; }
+.log-entry { padding:1px 0; }
+.log-who { font-weight:bold; }
+.log-roll { color:#fbbf24; }
+.log-sys { color:var(--muted); font-style:italic; }
+.log-warn { color:var(--danger); }
+
+.ctx-menu { position:fixed; background:var(--panel); border:1px solid var(--accent); border-radius:4px; min-width:160px; z-index:2147483647; box-shadow:0 4px 12px rgba(0,0,0,.5); }
+#altPreview { position:fixed; top:50%; left:50%; transform:translate(-50%,-50%); z-index:2147483646; display:none; pointer-events:none; box-shadow:0 8px 40px rgba(0,0,0,.8); border:2px solid var(--accent); border-radius:8px; background:#000; }
+#altPreview img { display:block; max-width:80vw; max-height:80vh; width:auto; height:auto; border-radius:6px; }
+#logHeader { display:flex; justify-content:space-between; align-items:center; padding:4px 8px; background:#000; border-bottom:1px solid var(--line); font-size:11px; color:var(--muted); text-transform:uppercase; letter-spacing:1px; }
+.log-toggle { padding:0 8px; font-size:14px; line-height:1; background:none; border:1px solid var(--line); }
+#logOverlay.collapsed { height:auto; }
+#logOverlay.collapsed #diceRow, #logOverlay.collapsed #logEntries { display:none; }
+.discard-panel { position:fixed; top:60px; right:360px; width:480px; max-height:80vh; background:var(--panel); border:1px solid var(--accent); border-radius:6px; z-index:2147483640; display:flex; flex-direction:column; box-shadow:0 8px 30px rgba(0,0,0,.6); }
+.discard-header { display:flex; justify-content:space-between; align-items:center; padding:8px 12px; background:#000; border-bottom:1px solid var(--line); font-weight:600; }
+.discard-grid { overflow-y:auto; padding:10px; display:grid; grid-template-columns: repeat(auto-fill, minmax(100px, 1fr)); gap:8px; }
+.discard-item { background:var(--panel2); border:1px solid var(--line); border-radius:4px; padding:4px; display:flex; flex-direction:column; gap:3px; }
+.discard-item .card-img { width:100%; border-radius:3px; }
+.discard-name { font-size:10px; text-align:center; color:var(--muted); }
+.discard-empty { grid-column:1/-1; text-align:center; color:var(--muted); padding:30px; }
+.ctx-item { padding:6px 12px; cursor:pointer; font-size:12px; }
+.ctx-item:hover { background:var(--accent); }
+.ctx-sep { height:1px; background:var(--line); margin:2px 0; }
+
+.join-overlay { position:fixed; inset:0; background:rgba(0,0,0,.9); display:flex; align-items:center; justify-content:center; z-index:3000; }
+.join-box { background:var(--panel); border:1px solid var(--accent); border-radius:8px; padding:24px; width:380px; display:flex; flex-direction:column; gap:10px; }
+.join-box h2 { margin:0 0 10px; }
+.jrow { display:flex; flex-direction:column; gap:3px; }
+.jrow label { font-size:11px; color:var(--muted); }
+</style>
+</head>
+<body>
+<div id="topbar">
+  <h1>DECK QUEST · PLAYER</h1>
+  <div>Room: <span id="roomCode" class="room-code">—</span></div>
+  <div class="grow"></div>
+  <span id="connStatus" style="color:var(--muted); font-size:11px;"></span>
+</div>
+<div id="main">
+  <div id="tableStage">
+    <div id="toolbar"></div>
+    <div id="deckStacks"></div>
+    <div id="discardStacks"></div>
+    <div id="figurineLayer"></div>
+    <div id="cardLayer"></div>
+    <canvas id="drawLayer"></canvas>
+    <div id="cursorLayer"></div>
+  </div>
+  <div id="rightRail"></div>
+</div>
+<div id="logOverlay">
+  <div id="diceRow"></div>
+  <div id="logEntries"></div>
+</div>
+<script>
+const ROLE = 'player';
+const CARDS = %%CARDS_JSON%%;
+%%SHARED_JS%%
+</script>
+</body>
+</html>
