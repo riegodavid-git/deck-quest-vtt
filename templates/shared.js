@@ -227,8 +227,20 @@ let peer = null;
 let connections = {};    // GM: playerId -> DataConnection. Player: { gm: DataConnection }
 let cursorThrottle = 0;
 
+// ICE servers: Google STUN + OpenRelay free TURN.
+// TURN is needed when players are behind strict NAT / double-NAT (very common on
+// home networks). Without it WebRTC falls back to the broker relay which can fail.
+const ICE_SERVERS = [
+  { urls: 'stun:stun.l.google.com:19302' },
+  { urls: 'stun:stun1.l.google.com:19302' },
+  { urls: 'turn:openrelay.metered.ca:80',               username: 'openrelayproject', credential: 'openrelayproject' },
+  { urls: 'turn:openrelay.metered.ca:443',              username: 'openrelayproject', credential: 'openrelayproject' },
+  { urls: 'turn:openrelay.metered.ca:443?transport=tcp',username: 'openrelayproject', credential: 'openrelayproject' },
+];
+const PEER_CONFIG = { config: { iceServers: ICE_SERVERS } };
+
 function setupPeerGM(roomCode) {
-  peer = new Peer(roomCode, { debug: 1 });
+  peer = new Peer(roomCode, { debug: 1, ...PEER_CONFIG });
   peer.on('open', id => {
     $('#connStatus').textContent = 'Hosting as ' + id;
     $('#roomCode').textContent = id;
@@ -251,7 +263,7 @@ function setupPeerGM(roomCode) {
 }
 
 function setupPeerPlayer(roomCode) {
-  peer = new Peer({ debug: 1 });
+  peer = new Peer({ debug: 1, ...PEER_CONFIG });
   peer.on('open', () => {
     $('#connStatus').textContent = 'Connecting to ' + roomCode + '...';
     const conn = peer.connect(roomCode, { reliable: true });
