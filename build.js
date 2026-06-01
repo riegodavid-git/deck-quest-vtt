@@ -133,7 +133,17 @@ function main() {
   }
 
   build('gm.template.html',     'gm.html',     true);
-  build('player.template.html', 'player.html', false);
+  // Player gets card metadata (needed to render hands) but not the token library (GM-only panel)
+  const playerOut = tpl => tpl
+    .replace('%%FONTS_CSS%%',   () => fontsCss)
+    .replace('%%SHARED_JS%%',   () => shared)
+    .replace('%%CARDS_JSON%%',  () => cardsJson)
+    .replace('%%TOKENS_JSON%%', () => '[]');
+  if (!fs.existsSync(DIST)) fs.mkdirSync(DIST);
+  const playerPath = path.join(DIST, 'player.html');
+  const playerTpl  = fs.readFileSync(path.join(TEMPLATES, 'player.template.html'), 'utf8');
+  fs.writeFileSync(playerPath, playerOut(playerTpl));
+  console.log(`Wrote ${playerPath} (${(fs.statSync(playerPath).size / 1024).toFixed(1)} KB)`);
   console.log('Done.');
 }
 

@@ -252,10 +252,40 @@ async function loadAssetAsDataUrl(relativePath) {
   if (!file) return null;
   return new Promise(res => {
     const reader = new FileReader();
-    reader.onload = e => { PATH_CACHE[relativePath] = e.target.result; res(e.target.result); };
+    reader.onload = async e => {
+      const dataUrl = e.target.result;
+      PATH_CACHE[relativePath] = dataUrl;
+      res(dataUrl);
+      // GM: register hash+path in assetMeta and push to connected players
+      // so they can render cards/tokens received via state
+      if (ROLE === 'gm' && STATE?.assetMeta) {
+        try {
+          const hash = await hashBlob(dataUrl);
+          PATH_TO_HASH[relativePath] = hash;
+          ASSETS[hash] = dataUrl;
+          if (!STATE.assetMeta[hash]) {
+            STATE.assetMeta[hash] = { kind: 'asset', size: dataUrl.length, path: relativePath };
+            for (const conn of Object.values(connections)) sendAsset(conn, hash, dataUrl, 'asset');
+          }
+        } catch (_) {}
+      }
+    };
     reader.onerror = () => res(null);
     reader.readAsDataURL(file);
   });
+}
+
+// Render a card image on any element — GM loads from filesystem,
+// player uses hash-based ASSETS received via sendAsset from GM.
+function loadCardImage(relativePath, imgEl) {
+  if (!relativePath) return;
+  if (ROLE === 'gm') {
+    loadAssetAsDataUrl(relativePath).then(url => { if (url) imgEl.src = url; });
+  } else {
+    const hash = PATH_TO_HASH[relativePath];
+    if (hash && ASSETS[hash]) imgEl.src = ASSETS[hash];
+    // If not yet received, rerenderAll() triggered by handleAssetMessage will pick it up later
+  }
 }
 
 // =================== State ===================
@@ -485,6 +515,9 @@ async function handleAssetMessage(data, fromConn) {
     ASSETS[data.hash] = dataUrl;
     await cacheAssetPut(data.hash, { kind: inc.kind, dataUrl });
     delete incomingAssets[data.hash];
+    // Update path→hash map so card rendering can find the image
+    const assetPath = activeState()?.assetMeta?.[data.hash]?.path;
+    if (assetPath) PATH_TO_HASH[assetPath] = data.hash;
     if (ROLE === 'gm') {
       STATE.assetMeta[data.hash] = { kind: inc.kind, size: dataUrl.length };
       // forward to all other players
@@ -504,10 +537,16 @@ async function handleAssetMessage(data, fromConn) {
 function requestMissingAssets(meta) {
   // Player side: compare meta vs local cache; request anything missing.
   for (const hash of Object.keys(meta || {})) {
-    if (ASSETS[hash]) continue;
+    const p = meta[hash]?.path;
+    if (ASSETS[hash]) { if (p) PATH_TO_HASH[p] = hash; continue; }
     cacheAssetGet(hash).then(cached => {
-      if (cached) { ASSETS[hash] = cached.dataUrl; rerenderAll(); }
-      else { connections.gm?.send({ type:'asset-request', hash }); }
+      if (cached) {
+        ASSETS[hash] = cached.dataUrl;
+        if (p) PATH_TO_HASH[p] = hash;
+        rerenderAll();
+      } else {
+        connections.gm?.send({ type:'asset-request', hash });
+      }
     });
   }
 }
@@ -947,7 +986,7 @@ function renderDeckStacks() {
     if (count > 0 && backCard) {
       const bimg = el('img', { class:'card-img', draggable:'false' });
       bimg.style.background = 'var(--panel)';
-      loadAssetAsDataUrl(backCard.backPath).then(url => { if (url) bimg.src = url; });
+      loadCardImage(backCard.backPath, bimg);
       stack.appendChild(bimg);
     } else {
       stack.appendChild(el('div', { class:'card-empty' }, 'Empty'));
@@ -968,7 +1007,7 @@ function renderDeckStacks() {
       if (top) {
         const dimg = el('img', { class:'card-img' });
         dimg.style.background = 'var(--panel)';
-        loadAssetAsDataUrl(CARDS_BY_ID[top].path).then(url => { if (url) dimg.src = url; });
+        loadCardImage(CARDS_BY_ID[top].path, dimg);
         stack.appendChild(dimg);
       }
       else stack.appendChild(el('div', { class:'card-empty' }, 'Discard'));
@@ -990,7 +1029,7 @@ function renderTableCards() {
     const div = el('div', { class:'placed-card' + (c.locked?' locked':'') + (selectionSet.has(c.instId)?' selected':'') + (c.groupId?' grouped':''), style:{ left:c.x+'px', top:c.y+'px', transform:`rotate(${c.rot||0}deg)`, zIndex:c.z||1 }, 'data-inst-id': c.instId });
     const cimg = el('img', { class:'card-img', draggable:'false' });
     cimg.style.background = 'var(--panel)';
-    loadAssetAsDataUrl(c.faceUp ? card.path : card.backPath).then(url => { if (url) cimg.src = url; });
+    loadCardImage(c.faceUp ? card.path : card.backPath, cimg);
     div.appendChild(cimg);
     if (c.locked) div.appendChild(el('div', { class:'figurine-lock-icon', title:'Locked by GM' }, '🔒'));
     if (!c.locked) {
@@ -1409,8 +1448,8 @@ function handCardEl(c, owner, editable) {
   const div = el('div', { class:'hand-card', title: showFace ? card.name : '' });
   const himg = el('img', { class:'card-img' });
   himg.style.background = 'var(--panel)';
-  const hPath = showFace ? card.path : (card?.backPath || CARDS_BY_TYPE.role[0]?.backPath);
-  if (hPath) loadAssetAsDataUrl(hPath).then(url => { if (url) himg.src = url; });
+  const hPath = showFace ? card?.path : (card?.backPath || CARDS_BY_TYPE.role[0]?.backPath);
+  loadCardImage(hPath, himg);
   div.appendChild(himg);
   if (editable !== false && (ROLE === 'gm' || owner === MY_ID)) {
     div.addEventListener('click', () => sendOp({ type:'flip-card', where:'hand', owner, instId:c.instId }));
@@ -1789,7 +1828,7 @@ function openSearch(filterType) {
       const r = el('div', { class:'search-result' });
       const simg = el('img');
       simg.style.background = 'var(--panel)';
-      loadAssetAsDataUrl(c.path).then(url => { if (url) simg.src = url; });
+      loadCardImage(c.path, simg);
       r.appendChild(simg);
       r.appendChild(el('div', {}, c.name + ' (' + c.type + ')'));
       const actions = el('div', { class:'sr-actions' });
@@ -1824,6 +1863,7 @@ let currentTool = 'pointer';
 let currentColor = '#3b82f6';
 let currentWidth = 3;
 let activeStroke = null;
+const PATH_TO_HASH = {};   // relativePath → hash; lets players look up received card images by path
 let _chatUnread = 0;
 let _chatPaneActive = false;
 let _lastChatCount = 0;
@@ -2397,7 +2437,7 @@ function showDiscardPanel(deckType) {
     const item = el('div', { class:'discard-item' });
     const dimg = el('img', { class:'card-img', title: card.name });
     dimg.style.background = 'var(--panel)';
-    loadAssetAsDataUrl(card.path).then(url => { if (url) dimg.src = url; });
+    loadCardImage(card.path, dimg);
     item.appendChild(dimg);
     item.appendChild(el('div', { class:'discard-name' }, card.name));
     if (ROLE === 'gm') {
