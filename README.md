@@ -8,19 +8,31 @@ A browser-based virtual tabletop for [Deck Quest](https://www.garagesofagames.co
 
 Grab **`gm.html`** and **`player.html`** from the [latest Release](../../releases/latest).
 
-> **File size:** ~145 MB each. All 337 cards, 1 924 D&D tokens, and fonts are embedded directly — no internet connection required during play (only the WebSocket relay and the token panel need an internet connection).
+> **v0.4.0 — File size:** ~650 KB each. Images are no longer embedded; the GM loads them from a local assets folder on first launch (see setup below).
+
+### GM — first-time setup
+
+1. **Download the Deck Quest Assets folder** from Google Drive:
+   👉 [https://drive.google.com/drive/folders/1BWYKOh0a8kXQD-DMUdobWBtP-_GkkLVl?usp=sharing](https://drive.google.com/drive/folders/1BWYKOh0a8kXQD-DMUdobWBtP-_GkkLVl?usp=sharing)
+   *(Request access if the link is restricted — the folder will be shared with you.)*
+2. Extract / save the folder anywhere on your computer.
+3. Open `gm.html` in **Google Chrome** (required for file system access).
+4. A setup dialog will appear — click **Open Assets Folder** and select the downloaded `Deck Quest Assets` folder.
+5. Chrome will ask for read permission — click **Allow**.
+6. Enter the number of players (1–10) when prompted. Cards and tokens load automatically.
+
+> **Every subsequent launch:** the setup dialog will appear again — just select the same folder. Chrome remembers the permission as long as the folder hasn't moved.
 
 ### GM — starting a session
 
-1. Open `gm.html` in your browser (Chrome or Firefox recommended).
-2. Wait for it to load (~15–30 seconds on a modern machine).
-3. Enter the number of players (1–10) when prompted.
-4. The room code appears in the top bar — share it with your players.
-5. Once everyone has joined, start the adventure.
+1. Open `gm.html` in Chrome and complete the assets folder setup (above).
+2. Enter the number of players (1–10) when prompted.
+3. The room code appears in the top bar — share it with your players.
+4. Once everyone has joined, start the adventure.
 
 ### Players — joining a session
 
-1. Open `player.html` in your browser.
+1. Open `player.html` in any modern browser (Chrome, Firefox, Edge, etc.).
 2. Enter the room code the GM shared with you.
 3. Pick a slot, type your name, optionally upload a profile picture.
 4. Click **Join**. Your character token appears on the table automatically.

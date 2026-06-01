@@ -4,3 +4,12 @@ node_modules/
 .DS_Store
 Thumbs.db
 relay/node_modules/
+
+# Local GM assets folder — distributed via Google Drive, not tracked in git
+Deck Quest Assets/
+# Legacy name
+Deck Quest Open Source PNGs/
+# Organised output from scripts/organize-assets.mjs
+Deck Quest Open Source PNGs Organized/
+Website Pegs/
+implementation prompt - file system asset loading.md

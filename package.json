@@ -4,8 +4,5 @@
   "description": "Build tools for Deck Quest VTT",
   "scripts": {
     "build": "node build.js"
-  },
-  "dependencies": {
-    "sharp": "^0.33.0"
   }
 }

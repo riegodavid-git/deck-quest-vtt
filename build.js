@@ -1,27 +1,23 @@
 #!/usr/bin/env node
-// Build script for Deck Quest VTT.
-// 1. Scans "Deck Quest Open Source PNGs/" — base64-embeds all card art (face + back).
-// 2. Scans "1st D&D Token Collection/" — compresses every token to 128×128 PNG.
-// 3. Injects both into gm.template.html and player.template.html.
-// Outputs dist/gm.html and dist/player.html.
+// Build script for Deck Quest VTT v0.4.0.
+// Produces metadata-only JSON (no embedded images).
+// Cards: { id, name, type, path, backPath }
+// Tokens: { id, name, cats, path }
+// Build time: < 1 second.
 //
-// Run once after install:  npm install
-// Then any time you edit templates:  node build.js
+// Run: node build.js
 
 const fs   = require('fs');
 const path = require('path');
-const sharp = require('sharp');
 
-const ROOT       = __dirname;
-const PNG_ROOT   = path.join(ROOT, 'Deck Quest Open Source PNGs');
-const TOKEN_ROOT = path.join(PNG_ROOT, '1st D&D Token  Collection');
-const TEMPLATES  = path.join(ROOT, 'templates');
-const FONTS      = path.join(ROOT, 'fonts');
-const DIST       = path.join(ROOT, 'dist');
+const ROOT      = __dirname;
+const PNG_ROOT  = path.join(ROOT, 'Deck Quest Assets');
+const TOKEN_ROOT = path.join(PNG_ROOT, 'Tokens');
+const TEMPLATES = path.join(ROOT, 'templates');
+const FONTS     = path.join(ROOT, 'fonts');
+const DIST      = path.join(ROOT, 'dist');
 
 // ── Font embedding ───────────────────────────────────────────────────────────
-// Read each woff2, base64-encode, return a CSS string of @font-face rules.
-// Keeps the build self-contained / offline.
 const FONT_FACES = [
   { family: 'Libre Caslon Text', weight: 700, file: 'libre-caslon-text-700.woff2' },
   { family: 'Hanken Grotesk',    weight: 400, file: 'hanken-grotesk.woff2' },
@@ -41,14 +37,14 @@ function loadFonts() {
   return rules;
 }
 
-// ── Card backs ───────────────────────────────────────────────────────────────
+// ── Card backs — relative paths from assets root ─────────────────────────────
 const BACKS = {
-  role:      'RoleBack-01.png',
-  skill:     'SkillBack-01.png',
-  item:      'ItemBack-01.png',
-  location:  'AreaBack-01.png',
-  adversary: 'AdversaryBack-01.png',
-  info:      'InfoBack-01.png',
+  role:      'Backs/PNGs/RoleBack-01.png',
+  skill:     'Backs/PNGs/SkillBack-01.png',
+  item:      'Backs/PNGs/ItemBack-01.png',
+  location:  'Backs/PNGs/AreaBack-01.png',
+  adversary: 'Backs/PNGs/AdversaryBack-01.png',
+  info:      'Backs/PNGs/InfoBack-01.png',
 };
 
 const CARD_FOLDERS = [
@@ -66,109 +62,79 @@ function slugify(s) {
 function slugToken(s) {
   return s.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '');
 }
-function fileToDataUrl(p) {
-  return 'data:image/png;base64,' + fs.readFileSync(p).toString('base64');
-}
 
-// ── Token scanning ────────────────────────────────────────────────────────────
-// Walk the token directory tree, compress every PNG to 128×128, return flat array.
-// token: { id, name, cats: string[], image: dataUrl }
-async function scanTokens() {
-  const allFiles = [];
-  function walk(dir, cats) {
+// ── Token scanning — metadata only, no image compression ─────────────────────
+function scanTokens() {
+  const tokens = [];
+  function walk(dir, cats, relBase) {
     if (!fs.existsSync(dir)) return;
     const entries = fs.readdirSync(dir, { withFileTypes: true });
     for (const e of entries) {
-      if (e.isDirectory()) walk(path.join(dir, e.name), [...cats, e.name]);
-      else if (e.isFile() && e.name.toLowerCase().endsWith('.png'))
-        allFiles.push({ filePath: path.join(dir, e.name), name: e.name.replace(/\.png$/i, ''), cats });
+      if (e.isDirectory()) {
+        walk(path.join(dir, e.name), [...cats, e.name], relBase + e.name + '/');
+      } else if (e.isFile() && e.name.toLowerCase().endsWith('.png')) {
+        const name = e.name.replace(/\.png$/i, '');
+        const id = [...cats.map(slugToken), slugToken(name)].join('/');
+        tokens.push({ id, name, cats, path: 'Tokens/' + relBase + e.name });
+      }
     }
   }
-  walk(TOKEN_ROOT, []);
-
-  console.log(`Found ${allFiles.length} token PNGs — compressing to 128×128…`);
-
-  // Process in batches of 40 for speed without memory overload
-  const BATCH = 40;
-  const tokens = [];
-  for (let i = 0; i < allFiles.length; i += BATCH) {
-    const batch = allFiles.slice(i, i + BATCH);
-    const results = await Promise.all(batch.map(async ({ filePath, name, cats }) => {
-      try {
-        const buf = await sharp(filePath)
-          .resize(128, 128, { fit: 'contain', background: { r: 0, g: 0, b: 0, alpha: 0 } })
-          .png({ compressionLevel: 9 })
-          .toBuffer();
-        const id = [...cats.map(slugToken), slugToken(name)].join('/');
-        return { id, name, cats, image: 'data:image/png;base64,' + buf.toString('base64') };
-      } catch (e) {
-        console.warn(`  ⚠ skip ${name}: ${e.message}`);
-        return null;
-      }
-    }));
-    tokens.push(...results.filter(Boolean));
-    process.stdout.write(`  ${Math.min(i + BATCH, allFiles.length)}/${allFiles.length} tokens processed\r`);
-  }
-  process.stdout.write('\n');
+  walk(TOKEN_ROOT, [], '');
   return tokens;
 }
 
 // ── Main ──────────────────────────────────────────────────────────────────────
-async function main() {
+function main() {
   // Cards
-  console.log('Reading card backs…');
-  const backDataUrls = {};
-  for (const [type, file] of Object.entries(BACKS)) {
-    const p = path.join(PNG_ROOT, 'Backs/PNGs', file);
-    backDataUrls[type] = fileToDataUrl(p);
-    console.log(`  ${type} back: ${(fs.statSync(p).size / 1024).toFixed(1)} KB`);
-  }
-
   const cards = [];
-  let cardBytes = 0;
   for (const { type, dir } of CARD_FOLDERS) {
     const full = path.join(PNG_ROOT, dir);
     if (!fs.existsSync(full)) { console.warn(`Missing folder: ${full}`); continue; }
     const files = fs.readdirSync(full).filter(f => f.toLowerCase().endsWith('.png'));
     console.log(`${type}: ${files.length} cards`);
     for (const f of files) {
-      const p = path.join(full, f);
-      cardBytes += fs.statSync(p).size;
       const name = f.replace(/-01\.png$/i, '').replace(/\.png$/i, '');
-      cards.push({ id: type + '-' + slugify(name), name, type, image: fileToDataUrl(p), back: backDataUrls[type] });
+      cards.push({
+        id: type + '-' + slugify(name),
+        name,
+        type,
+        path: dir + '/' + f,
+        backPath: BACKS[type],
+      });
     }
   }
-  console.log(`Total: ${cards.length} cards, ~${(cardBytes / 1024 / 1024).toFixed(1)} MB raw`);
+  console.log(`Total: ${cards.length} cards`);
 
   // Tokens
-  const tokens = await scanTokens();
-  console.log(`Tokens: ${tokens.length} embedded`);
+  const tokens = scanTokens();
+  console.log(`Tokens: ${tokens.length} found`);
 
-  // Payload sizes
+  // JSON payloads
   const cardsJson  = JSON.stringify(cards);
   const tokensJson = JSON.stringify(tokens);
-  console.log(`Cards JSON: ~${(cardsJson.length  / 1024 / 1024).toFixed(1)} MB`);
-  console.log(`Tokens JSON: ~${(tokensJson.length / 1024 / 1024).toFixed(1)} MB`);
+  console.log(`Cards JSON:  ~${(cardsJson.length  / 1024).toFixed(1)} KB`);
+  console.log(`Tokens JSON: ~${(tokensJson.length / 1024).toFixed(1)} KB`);
 
   const shared   = fs.readFileSync(path.join(TEMPLATES, 'shared.js'), 'utf8');
   const fontsCss = loadFonts();
 
-  function build(templateName, outName) {
+  if (!fs.existsSync(DIST)) fs.mkdirSync(DIST);
+
+  function build(templateName, outName, includeAssets) {
     const tpl = fs.readFileSync(path.join(TEMPLATES, templateName), 'utf8');
     const out = tpl
       .replace('%%FONTS_CSS%%',   () => fontsCss)
       .replace('%%SHARED_JS%%',   () => shared)
-      .replace('%%CARDS_JSON%%',  () => cardsJson)
-      .replace('%%TOKENS_JSON%%', () => tokensJson);
-    if (!fs.existsSync(DIST)) fs.mkdirSync(DIST);
+      .replace('%%CARDS_JSON%%',  () => includeAssets ? cardsJson  : '[]')
+      .replace('%%TOKENS_JSON%%', () => includeAssets ? tokensJson : '[]');
     const outPath = path.join(DIST, outName);
     fs.writeFileSync(outPath, out);
-    console.log(`Wrote ${outPath} (${(out.length / 1024 / 1024).toFixed(1)} MB)`);
+    console.log(`Wrote ${outPath} (${(out.length / 1024).toFixed(1)} KB)`);
   }
 
-  build('gm.template.html',     'gm.html');
-  build('player.template.html', 'player.html');
+  build('gm.template.html',     'gm.html',     true);
+  build('player.template.html', 'player.html', false);
   console.log('Done.');
 }
 
-main().catch(err => { console.error(err); process.exit(1); });
+main();

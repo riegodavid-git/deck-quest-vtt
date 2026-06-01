@@ -69,7 +69,7 @@ button .icon + span, button span + .icon { margin-left:6px; }
 #discardTab   { top:160px; }
 #railTab      { top:88px; }
 @supports not (backdrop-filter: blur(1px)) {
-  .panel-handle, #deckStacks, #discardStacks, .panel-tab, #logOverlay, .ctx-menu, .join-box, .token-box, #toolbar { background-color: var(--panel) !important; }
+  .panel-handle, #deckStacks, #discardStacks, .panel-tab, #logChatPanel, .ctx-menu, .join-box, .token-box, #toolbar { background-color: var(--panel) !important; }
 }
 
 .panel-tab { position:absolute; z-index:11; background:var(--glass-bg); backdrop-filter:var(--glass-blur); -webkit-backdrop-filter:var(--glass-blur); border:1px solid var(--line-strong); color:var(--accent); padding:10px 6px; cursor:pointer; line-height:1; user-select:none; display:none; box-shadow:0 4px 14px rgba(0,0,0,.5); }
@@ -176,11 +176,21 @@ button .icon + span, button span + .icon { margin-left:6px; }
 .hand-card:hover { transform: translateY(-4px); }
 .hand-card .card-img { width:100%; display:block; border-radius:3px; box-shadow:0 4px 10px rgba(0,0,0,.6); }
 
-#logOverlay { position:fixed; bottom:16px; left:16px; width:380px; height:240px; background:var(--glass-bg); backdrop-filter:var(--glass-blur); -webkit-backdrop-filter:var(--glass-blur); border:1px solid var(--line-strong); border-radius:var(--radius-lg); display:flex; flex-direction:column; z-index:100; box-shadow:0 8px 28px rgba(0,0,0,.6); overflow:hidden; }
-#logHeader { display:flex; justify-content:space-between; align-items:center; padding:8px 12px; background:rgba(0,0,0,.55); border-bottom:1px solid var(--line); font:600 10px/1 var(--font-display); color:var(--parchment); text-transform:uppercase; letter-spacing:.18em; }
-.log-toggle { padding:0 6px; min-width:24px; min-height:22px; background:transparent; border:1px solid var(--line); color:var(--muted); display:inline-flex; align-items:center; justify-content:center; }
-.log-toggle:hover { color:var(--accent); border-color:var(--accent); background:transparent; }
-#diceRow { display:flex; gap:4px; padding:8px 10px; border-bottom:1px solid var(--line); flex-wrap:wrap; }
+/* Combined Log & Chat panel */
+#logChatPanel { position:absolute; bottom:16px; left:50%; transform:translateX(-50%); width:380px; background:var(--glass-bg); backdrop-filter:var(--glass-blur); -webkit-backdrop-filter:var(--glass-blur); border:1px solid var(--line-strong); border-radius:var(--radius-lg); display:flex; flex-direction:column; z-index:100; box-shadow:0 8px 28px rgba(0,0,0,.6); overflow:hidden; transition:transform .25s ease; }
+#logChatPanel.lc-hidden { transform:translateY(calc(100% + 20px)); }
+#lcTabs { display:flex; align-items:stretch; background:rgba(0,0,0,.55); border-bottom:1px solid var(--line); flex-shrink:0; }
+.lc-tab { flex:1; padding:8px 12px; font:600 10px/1 var(--font-display); color:var(--muted); text-transform:uppercase; letter-spacing:.18em; background:transparent; border:none; border-bottom:2px solid transparent; cursor:pointer; transition:color .15s; display:inline-flex; align-items:center; justify-content:center; gap:5px; }
+.lc-tab:hover { color:var(--parchment); }
+.lc-tab.lc-active { color:var(--parchment); border-bottom-color:var(--accent); }
+.chat-badge { background:var(--accent); color:#1a1612; font:700 9px/1 var(--font-mono); padding:1px 5px; border-radius:8px; display:none; }
+#lcMinBtn { background:transparent; border:none; border-left:1px solid var(--line); color:var(--muted); padding:0 10px; cursor:pointer; display:inline-flex; align-items:center; flex-shrink:0; }
+#lcMinBtn:hover { color:var(--accent); }
+#lcBody { height:220px; display:flex; flex-direction:column; overflow:hidden; transition:height .2s ease; }
+#lcBody.lc-min { height:0; }
+#logPane { display:flex; flex-direction:column; flex:1; overflow:hidden; }
+#chatPane { display:none; flex-direction:column; flex:1; overflow:hidden; }
+#diceRow { display:flex; gap:4px; padding:8px 10px; border-bottom:1px solid var(--line); flex-wrap:wrap; flex-shrink:0; }
 .die-btn { padding:4px 9px; font:500 11px/1 var(--font-mono); min-width:36px; letter-spacing:.05em; text-transform:none; }
 #logEntries { flex:1; overflow-y:auto; padding:8px 12px; font:400 12px/1.5 var(--font-body); }
 .log-entry { padding:2px 0; }
@@ -188,8 +198,15 @@ button .icon + span, button span + .icon { margin-left:6px; }
 .log-roll { color:#fbbf24; font-family:var(--font-mono); }
 .log-sys { color:var(--muted); font-style:italic; }
 .log-warn { color:var(--danger); }
-#logOverlay.collapsed { height:auto; }
-#logOverlay.collapsed #diceRow, #logOverlay.collapsed #logEntries { display:none; }
+#chatMessages { flex:1; overflow-y:auto; padding:8px 12px; display:flex; flex-direction:column; gap:4px; }
+.chat-msg { font:400 12px/1.5 var(--font-body); }
+.chat-msg-who { font:600 12px/1 var(--font-display); }
+.chat-msg-text { color:var(--text); }
+.chat-msg-me .chat-msg-text { color:var(--accent); }
+#chatInput { display:flex; gap:6px; padding:8px 10px; border-top:1px solid var(--line); flex-shrink:0; }
+#chatInput input { flex:1; padding:5px 8px; font:400 12px/1.4 var(--font-body); background:rgba(0,0,0,.4); border:1px solid var(--line); border-radius:var(--radius); }
+#chatInput input:focus { border-color:var(--accent); outline:none; }
+#chatInput button { padding:5px 10px; font-size:11px; }
 
 .ctx-menu { position:fixed; background:var(--glass-bg); backdrop-filter:var(--glass-blur); -webkit-backdrop-filter:var(--glass-blur); border:1px solid var(--line-strong); border-radius:var(--radius); min-width:170px; max-height:70vh; overflow-y:auto; z-index:2147483647; box-shadow:0 8px 24px rgba(0,0,0,.7); padding:4px; }
 .ctx-item { padding:7px 12px; cursor:pointer; font:400 12px/1.3 var(--font-body); border-radius:3px; transition: background .1s; }
@@ -237,19 +254,6 @@ button .icon + span, button span + .icon { margin-left:6px; }
 ::-webkit-scrollbar-thumb { background:var(--line); border-radius:5px; }
 ::-webkit-scrollbar-thumb:hover { background:var(--line-strong); }
 
-#chatOverlay { position:fixed; bottom:16px; left:412px; width:320px; height:240px; background:var(--glass-bg); backdrop-filter:var(--glass-blur); -webkit-backdrop-filter:var(--glass-blur); border:1px solid var(--line-strong); border-radius:var(--radius-lg); display:flex; flex-direction:column; z-index:100; box-shadow:0 8px 28px rgba(0,0,0,.6); overflow:hidden; }
-#chatHeader { display:flex; justify-content:space-between; align-items:center; padding:8px 12px; background:rgba(0,0,0,.55); border-bottom:1px solid var(--line); font:600 10px/1 var(--font-display); color:var(--parchment); text-transform:uppercase; letter-spacing:.18em; }
-#chatMessages { flex:1; overflow-y:auto; padding:8px 12px; display:flex; flex-direction:column; gap:4px; }
-.chat-msg { font:400 12px/1.5 var(--font-body); }
-.chat-msg-who { font:600 12px/1 var(--font-display); }
-.chat-msg-text { color:var(--text); }
-.chat-msg-me .chat-msg-text { color:var(--accent); }
-#chatInput { display:flex; gap:6px; padding:8px 10px; border-top:1px solid var(--line); }
-#chatInput input { flex:1; padding:5px 8px; font:400 12px/1.4 var(--font-body); background:rgba(0,0,0,.4); border:1px solid var(--line); border-radius:var(--radius); }
-#chatInput input:focus { border-color:var(--accent); outline:none; }
-#chatInput button { padding:5px 10px; font-size:11px; }
-#chatOverlay.collapsed { height:auto; }
-#chatOverlay.collapsed #chatMessages, #chatOverlay.collapsed #chatInput { display:none; }
 
 /* Remove number input spinners */
 input[type=number]::-webkit-inner-spin-button,
@@ -287,24 +291,30 @@ input[type=number] { -moz-appearance:textfield; }
       <canvas id="drawLayer"></canvas>
       <div id="cursorLayer"></div>
     </div>
+    <div id="logChatPanel">
+      <div id="lcTabs">
+        <button class="lc-tab lc-active" id="lcTabLog">Log &amp; Dice</button>
+        <button class="lc-tab" id="lcTabChat">Chat<span id="chatBadge" class="chat-badge"></span></button>
+        <button id="lcMinBtn" title="Minimise"></button>
+      </div>
+      <div id="lcBody">
+        <div id="logPane">
+          <div id="diceRow"></div>
+          <div id="logEntries"></div>
+        </div>
+        <div id="chatPane">
+          <div id="chatMessages"></div>
+          <div id="chatInput">
+            <input type="text" id="chatInputField" placeholder="Message…" autocomplete="off">
+            <button id="chatSendBtn">Send</button>
+          </div>
+        </div>
+      </div>
+    </div>
   </div>
   <div id="rightRail"></div>
   <div id="railTab" data-icon="chevron-right" title="Hide players panel"></div>
 </div>
-<div id="logOverlay">
-  <div id="diceRow"></div>
-  <div id="logEntries"></div>
-</div>
-<div id="chatOverlay">
-  <div id="chatHeader">
-    <span>Chat</span>
-    <button class="log-toggle" id="chatToggle" title="Toggle chat"></button>
-  </div>
-  <div id="chatMessages"></div>
-  <div id="chatInput">
-    <input type="text" id="chatInputField" placeholder="Message…" autocomplete="off">
-    <button id="chatSendBtn">Send</button>
-  </div>
 </div>
 <script type="application/json" id="_cards_data">%%CARDS_JSON%%</script>
 <script type="application/json" id="_tokens_data">%%TOKENS_JSON%%</script>
