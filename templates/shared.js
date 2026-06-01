@@ -2647,7 +2647,14 @@ function setupToolbarUI() {
   }});
   resetBtn.appendChild(icon('target'));
   tb.appendChild(resetBtn);
-  // GM-only: token library, battlemaps browser, map/token upload, search
+  // Custom token upload — available to everyone
+  const tokenBtn = el('label', { class:'tool-btn', title:'Upload a custom token' });
+  tokenBtn.appendChild(icon('plus'));
+  tokenBtn.appendChild(el('span', {}, 'Token'));
+  const tokenI = el('input', { type:'file', accept:'image/*', style:{display:'none'}});
+  tokenI.addEventListener('change', e => { uploadFigurine(e.target.files[0], 'figurine'); tokenI.value=''; });
+  tokenBtn.appendChild(tokenI); tb.appendChild(tokenBtn);
+  // GM-only: token library, battlemaps browser, map upload, search
   if (ROLE === 'gm') {
     const tokenLibBtn = el('button', { class:'tool-btn', title:'Browse & add D&D tokens', onclick: () => openTokenPanel() });
     tokenLibBtn.appendChild(icon('tokens'));
@@ -2664,12 +2671,6 @@ function setupToolbarUI() {
     const mapI = el('input', { type:'file', accept:'image/*', style:{display:'none'}});
     mapI.addEventListener('change', e => { uploadFigurine(e.target.files[0], 'map'); mapI.value=''; });
     mapBtn.appendChild(mapI); tb.appendChild(mapBtn);
-    const tokenBtn = el('label', { class:'tool-btn', title:'Upload a custom token' });
-    tokenBtn.appendChild(icon('plus'));
-    tokenBtn.appendChild(el('span', {}, 'Token'));
-    const tokenI = el('input', { type:'file', accept:'image/*', style:{display:'none'}});
-    tokenI.addEventListener('change', e => { uploadFigurine(e.target.files[0], 'figurine'); tokenI.value=''; });
-    tokenBtn.appendChild(tokenI); tb.appendChild(tokenBtn);
     const searchBtn = el('button', { class:'tool-btn', title:'Search cards', onclick: () => openSearch() });
     searchBtn.appendChild(icon('search'));
     searchBtn.appendChild(el('span', {}, 'Search'));
