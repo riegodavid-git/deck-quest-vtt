@@ -43,6 +43,11 @@ const KEYBIND_HELP = [
   { group:'Tokens (hover a token)',    keys:['L'],            label:'Lock / unlock',           role:'gm' },
   { group:'Tokens (hover a token)',    keys:['E'],            label:'Duplicate',               role:'gm' },
   { group:'Tokens (hover a token)',    keys:['Del'],          label:'Delete',                  role:'gm' },
+  { group:'Selection',                 keys:['Ctrl','C'],     label:'Copy selected',           role:'all' },
+  { group:'Selection',                 keys:['Ctrl','V'],     label:'Paste at cursor',         role:'all' },
+  { group:'Selection',                 keys:['Ctrl','G'],     label:'Group selected',          role:'all' },
+  { group:'Selection',                 keys:['Ctrl','⇧','G'], label:'Ungroup',                 role:'all' },
+  { group:'Selection',                 keys:['drag'],         label:'Lasso-select on empty table', role:'all' },
   { group:'Cards (hover a table card)',keys:['F'],            label:'Flip card',               role:'all' },
   { group:'Cards (hover a table card)',keys:['L'],            label:'Lock / unlock',           role:'gm' },
   { group:'Cards (hover a table card)',keys:['Del'],          label:'Discard',                 role:'gm' },
@@ -903,7 +908,9 @@ function applyOp(op, by) {
       break;
     }
     case 'add-figurine': {
-      s.table.figurines.push({ instId: uid(), assetHash: op.hash, x: op.x||300, y: op.y||300, w: op.w||200, h: op.h||200, rot: 0, z: nextZ(), label: op.label || '' });
+      s.table.figurines.push({ instId: uid(), assetHash: op.hash, x: op.x||300, y: op.y||300, w: op.w||200, h: op.h||200,
+        rot: op.rot||0, z: nextZ(), label: op.label || '',
+        opacity: op.opacity!=null?op.opacity:1, flipH: !!op.flipH, flipV: !!op.flipV, showName: !!op.showName });
       break;
     }
     case 'move-figurine': {
@@ -1716,6 +1723,22 @@ const STATUS_EFFECTS = [
   ['sneaking',  '🌫️ Sneaking'],
   ['down',      '💀 Down'],
 ];
+// Figurines this action should affect: the whole multi-selection (if f is in it), else just f.
+function selFigs(f) {
+  const s = activeState(); if (!s) return [f];
+  if (selectionSet.has(f.instId) && selectionSet.size > 1)
+    return [...selectionSet].map(id => s.table.figurines.find(x => x.instId === id)).filter(Boolean);
+  return [f];
+}
+// Apply a move-figurine edit to every affected figurine (fn computes per-figurine fields).
+function figEdit(f, fn) { for (const t of selFigs(f)) sendOp({ type:'move-figurine', instId:t.instId, ...fn(t) }); }
+// Center-anchored scale fields for a figurine.
+function scaleFields(t, factor) {
+  const cx = t.x + t.w/2, cy = t.y + t.h/2;
+  const nw = Math.max(20, Math.round(t.w*factor)), nh = Math.max(20, Math.round(t.h*factor));
+  return { w:nw, h:nh, x:Math.round(cx-nw/2), y:Math.round(cy-nh/2) };
+}
+
 function showFigurineContextMenu(f, e) {
   // Auto-expand selection to the whole group when right-clicking a grouped item
   if (!selectionSet.has(f.instId)) {
@@ -1764,57 +1787,62 @@ function showFigurineContextMenu(f, e) {
     }});
     items.push('-');
   }
+  const multi = selectionSet.has(f.instId) && selectionSet.size > 1;
   items.push(
-    { label: f.locked ? '🔓 Unlock' : '🔒 Lock', action: () => sendOp({ type:'move-figurine', instId:f.instId, locked:!f.locked }) },
+    { label: f.locked ? '🔓 Unlock' : '🔒 Lock', action: () => figEdit(f, t => ({ locked:!t.locked })) },
     { label:'Rename / Label...', action: () => {
         const v = prompt('Label (blank to clear):', f.label || '');
-        if (v != null) sendOp({ type:'set-figurine-label', instId:f.instId, label: v });
+        if (v != null) for (const t of selFigs(f)) sendOp({ type:'set-figurine-label', instId:t.instId, label: v });
       } },
-    { label: (f.showName ? '✓ ' : '  ') + 'Show name', action: () => sendOp({ type:'move-figurine', instId:f.instId, showName: !f.showName }) },
+    { label: (f.showName ? '✓ ' : '  ') + 'Show name', action: () => figEdit(f, t => ({ showName: !t.showName })) },
     { label:'❤ Edit HP / Armor...', action: () => showTokenDetailPopup(f, e) },
     '-',
-    // Status effects — toggle each.
+    // Status effects — toggle each across the selection.
     ...STATUS_EFFECTS.map(([key, label]) => ({
       label: (eff[key] ? '✓ ' : '  ') + label,
-      action: () => sendOp({ type:'toggle-effect', instId:f.instId, effect:key }),
+      action: () => { for (const t of selFigs(f)) sendOp({ type:'toggle-effect', instId:t.instId, effect:key }); },
     })),
     '-',
-    { label:'Rotate +15°', action: () => sendOp({ type:'move-figurine', instId:f.instId, rot:(f.rot||0)+15 }) },
-    { label:'Rotate -15°', action: () => sendOp({ type:'move-figurine', instId:f.instId, rot:(f.rot||0)-15 }) },
-    { label:'Rotate +90°', action: () => sendOp({ type:'move-figurine', instId:f.instId, rot:(f.rot||0)+90 }) },
+    { label:'Rotate +15°', action: () => figEdit(f, t => ({ rot:(t.rot||0)+15 })) },
+    { label:'Rotate -15°', action: () => figEdit(f, t => ({ rot:(t.rot||0)-15 })) },
+    { label:'Rotate +90°', action: () => figEdit(f, t => ({ rot:(t.rot||0)+90 })) },
     { label:'Rotate exact...', action: () => {
         const v = prompt('Rotation in degrees:', String(f.rot||0));
-        if (v != null) sendOp({ type:'move-figurine', instId:f.instId, rot: parseFloat(v)||0 });
+        if (v != null) figEdit(f, () => ({ rot: parseFloat(v)||0 }));
       } },
-    { label:'Reset rotation', action: () => sendOp({ type:'move-figurine', instId:f.instId, rot: 0 }) },
+    { label:'Reset rotation', action: () => figEdit(f, () => ({ rot: 0 })) },
     '-',
-    { label:'Flip horizontal', action: () => sendOp({ type:'move-figurine', instId:f.instId, flipH: !f.flipH }) },
-    { label:'Flip vertical', action: () => sendOp({ type:'move-figurine', instId:f.instId, flipV: !f.flipV }) },
+    { label:'Flip horizontal', action: () => figEdit(f, t => ({ flipH: !t.flipH })) },
+    { label:'Flip vertical', action: () => figEdit(f, t => ({ flipV: !t.flipV })) },
     '-',
     { label:'Resize exact...', action: () => {
         const v = prompt('Width × Height (e.g. 400x300):', `${f.w}x${f.h}`);
         if (!v) return;
         const m = v.match(/^\s*(\d+)\s*[x×*]\s*(\d+)\s*$/i);
-        if (m) sendOp({ type:'move-figurine', instId:f.instId, w:parseInt(m[1],10), h:parseInt(m[2],10) });
+        if (m) figEdit(f, () => ({ w:parseInt(m[1],10), h:parseInt(m[2],10) }));
       } },
     { label:'Fit to original size', action: () => {
         const url = ASSETS[f.assetHash]; if (!url) return;
         const img = new Image(); img.onload = () => sendOp({ type:'move-figurine', instId:f.instId, w:img.naturalWidth, h:img.naturalHeight });
         img.src = url;
       } },
-    { label:'Scale ×2', action: () => sendOp({ type:'move-figurine', instId:f.instId, w:f.w*2, h:f.h*2 }) },
-    { label:'Scale ÷2', action: () => sendOp({ type:'move-figurine', instId:f.instId, w:Math.max(20,f.w/2), h:Math.max(20,f.h/2) }) },
+    { label: multi ? 'Scale all ×2' : 'Scale ×2', action: () => figEdit(f, t => scaleFields(t, 2)) },
+    { label: multi ? 'Scale all ÷2' : 'Scale ÷2', action: () => figEdit(f, t => scaleFields(t, 0.5)) },
     '-',
     { label:'Transparency...', action: () => showOpacitySlider(f, e.clientX, e.clientY) },
-    { label:'Reset transparency', action: () => sendOp({ type:'move-figurine', instId:f.instId, opacity: 1 }) },
+    { label:'Reset transparency', action: () => figEdit(f, () => ({ opacity: 1 })) },
     '-',
-    { label:'Bring to front', action: () => sendOp({ type:'move-figurine', instId:f.instId, bringToFront: true }) },
-    { label:'Send to back', action: () => sendOp({ type:'move-figurine', instId:f.instId, sendToBack: true }) },
+    { label:'Bring to front', action: () => figEdit(f, () => ({ bringToFront: true })) },
+    { label:'Send to back', action: () => figEdit(f, () => ({ sendToBack: true })) },
     '-',
-    { label:'Duplicate', action: () => sendOp({ type:'duplicate-figurine', instId:f.instId }) },
-    { label:'Reset all transforms', action: () => sendOp({ type:'move-figurine', instId:f.instId, rot:0, opacity:1, flipH:false, flipV:false, locked:false }) },
+    { label: multi ? 'Duplicate all' : 'Duplicate', action: () => { for (const t of selFigs(f)) sendOp({ type:'duplicate-figurine', instId:t.instId }); } },
+    { label:'Reset all transforms', action: () => figEdit(f, () => ({ rot:0, opacity:1, flipH:false, flipV:false, locked:false })) },
     '-',
-    { label:'🗑 Delete', action: () => { if (confirm('Delete this image?')) sendOp({ type:'remove-figurine', instId:f.instId }); } },
+    { label: multi ? `🗑 Delete all ${selectionSet.size}` : '🗑 Delete', action: () => {
+        if (!confirm(multi ? `Delete ${selectionSet.size} selected items?` : 'Delete this image?')) return;
+        for (const t of selFigs(f)) sendOp({ type:'remove-figurine', instId:t.instId });
+        selectionSet.clear();
+      } },
   );
   showMenu(items, e.clientX, e.clientY);
 }
@@ -1860,6 +1888,45 @@ function selectWholeGroup(instId) {
   selectionSet.clear();
   for (const id of getGroupMembers(gid)) selectionSet.add(id);
   return true;
+}
+
+// =================== Clipboard + grouping ===================
+let lastMouseTableX = 0, lastMouseTableY = 0;   // live cursor in table coords (for paste)
+let clipboard = [];                             // copied figurines (tokens/maps)
+
+function copySelection() {
+  const s = activeState(); if (!s || !selectionSet.size) return;
+  const figs = [...selectionSet]
+    .map(id => s.table.figurines.find(x => x.instId === id))
+    .filter(f => f && f.kind !== 'character');   // skip player character tokens
+  if (!figs.length) return;
+  let cx = 0, cy = 0;
+  for (const f of figs) { cx += f.x + f.w/2; cy += f.y + f.h/2; }
+  cx /= figs.length; cy /= figs.length;
+  clipboard = figs.map(f => ({
+    assetHash: f.assetHash, w: f.w, h: f.h, rot: f.rot||0, opacity: f.opacity,
+    flipH: !!f.flipH, flipV: !!f.flipV, label: f.label || '', showName: !!f.showName,
+    dx: (f.x + f.w/2) - cx, dy: (f.y + f.h/2) - cy,   // offset from selection centroid
+  }));
+}
+function pasteClipboard() {
+  if (!clipboard.length) return;
+  const px = lastMouseTableX, py = lastMouseTableY;
+  for (const it of clipboard) {
+    sendOp({ type:'add-figurine', hash: it.assetHash,
+      x: Math.round(px + it.dx - it.w/2), y: Math.round(py + it.dy - it.h/2),
+      w: it.w, h: it.h, label: it.label, showName: it.showName,
+      rot: it.rot, opacity: it.opacity, flipH: it.flipH, flipV: it.flipV });
+  }
+}
+function groupSelection() {
+  if (selectionSet.size < 2) return;
+  sendOp({ type:'set-group', instIds: [...selectionSet], groupId: uid() });
+}
+function ungroupSelection() {
+  const gids = new Set();
+  for (const id of selectionSet) { const g = getGroupIdOf(id); if (g) gids.add(g); }
+  for (const g of gids) sendOp({ type:'set-group', instIds: getGroupMembers(g), groupId: null });
 }
 
 // =================== Drag helper ===================
@@ -2091,6 +2158,7 @@ function setupTableInteraction() {
     const r = stage.getBoundingClientRect();
     const x = (e.clientX - r.left - tablePanX) / tableZoom;
     const y = (e.clientY - r.top  - tablePanY) / tableZoom;
+    lastMouseTableX = x; lastMouseTableY = y;   // for paste-at-cursor
     // throttle cursor broadcast
     const now = Date.now();
     if (now - cursorThrottle > 60) {
@@ -2180,17 +2248,17 @@ function setupTableInteraction() {
       return;
     }
 
-    // Figurine hover
+    // Figurine hover (applies to whole selection if hovered item is part of it)
     if (hoverInfo.kind === 'figurine') {
       const f = s.table.figurines.find(x => x.instId === hoverInfo.instId); if (!f) return;
       if (f.locked && ROLE !== 'gm') return;
-      if (k === 'f') sendOp({ type:'move-figurine', instId:f.instId, flipH: !f.flipH });
-      else if (k === 'r') sendOp({ type:'move-figurine', instId:f.instId, rot: ((f.rot||0)+90)%360 });
-      else if (k === '[') sendOp({ type:'move-figurine', instId:f.instId, sendToBack:true });
-      else if (k === ']') sendOp({ type:'move-figurine', instId:f.instId, bringToFront:true });
-      else if (k === 'l' && ROLE === 'gm') sendOp({ type:'move-figurine', instId:f.instId, locked: !f.locked });
-      else if (k === 'e' && ROLE === 'gm') sendOp({ type:'duplicate-figurine', instId:f.instId });
-      else if ((k === 'Delete' || k === 'Backspace') && ROLE === 'gm') sendOp({ type:'remove-figurine', instId:f.instId });
+      if (k === 'f') figEdit(f, t => ({ flipH: !t.flipH }));
+      else if (k === 'r') figEdit(f, t => ({ rot: ((t.rot||0)+90)%360 }));
+      else if (k === '[') figEdit(f, () => ({ sendToBack:true }));
+      else if (k === ']') figEdit(f, () => ({ bringToFront:true }));
+      else if (k === 'l' && ROLE === 'gm') figEdit(f, t => ({ locked: !t.locked }));
+      else if (k === 'e' && ROLE === 'gm') { for (const t of selFigs(f)) sendOp({ type:'duplicate-figurine', instId:t.instId }); }
+      else if ((k === 'Delete' || k === 'Backspace') && ROLE === 'gm') { for (const t of selFigs(f)) sendOp({ type:'remove-figurine', instId:t.instId }); }
       return;
     }
 
@@ -2203,6 +2271,16 @@ function setupTableInteraction() {
       else if ((k === 'Delete' || k === 'Backspace') && ROLE === 'gm') sendOp({ type:'transfer-card', from:{ where:'table', instId:c.instId }, to:{ where:'discard' } });
       return;
     }
+  });
+
+  // Ctrl/Cmd shortcuts: copy / paste / group / ungroup
+  window.addEventListener('keydown', e => {
+    if (e.target.matches && e.target.matches('input,textarea,select')) return;
+    if (!(e.ctrlKey || e.metaKey)) return;
+    const k = e.key.toLowerCase();
+    if (k === 'c') { copySelection(); e.preventDefault(); }
+    else if (k === 'v') { pasteClipboard(); e.preventDefault(); }
+    else if (k === 'g') { e.preventDefault(); if (e.shiftKey) ungroupSelection(); else groupSelection(); }
   });
 
   // Lasso-select: drag on empty table area to rubber-band select figurines/cards
