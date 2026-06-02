@@ -30,6 +30,32 @@ const TOKENS_BY_ID = {};
 // Multi-select — set of instIds currently selected
 const selectionSet = new Set();
 
+// =================== Keyboard shortcuts (source of truth) ===================
+// Hover-context: the action targets whatever the mouse is over.
+// `role`: 'gm' | 'all'. group: shown as a section in the help panel.
+const KEYBIND_HELP = [
+  { group:'Decks (hover a deck)',      keys:['S'],            label:'Shuffle deck',            role:'gm' },
+  { group:'Decks (hover a deck)',      keys:['D'],            label:'Draw to table',           role:'gm' },
+  { group:'Decks (hover a deck)',      keys:['G'],            label:'Draw to GM hand',         role:'gm' },
+  { group:'Tokens (hover a token)',    keys:['F'],            label:'Flip horizontally',       role:'all' },
+  { group:'Tokens (hover a token)',    keys:['R'],            label:'Rotate 90°',              role:'all' },
+  { group:'Tokens (hover a token)',    keys:['[',']'],       label:'Send back / bring front', role:'all' },
+  { group:'Tokens (hover a token)',    keys:['L'],            label:'Lock / unlock',           role:'gm' },
+  { group:'Tokens (hover a token)',    keys:['E'],            label:'Duplicate',               role:'gm' },
+  { group:'Tokens (hover a token)',    keys:['Del'],          label:'Delete',                  role:'gm' },
+  { group:'Cards (hover a table card)',keys:['F'],            label:'Flip card',               role:'all' },
+  { group:'Cards (hover a table card)',keys:['L'],            label:'Lock / unlock',           role:'gm' },
+  { group:'Cards (hover a table card)',keys:['Del'],          label:'Discard',                 role:'gm' },
+  { group:'Tools',                     keys:['1','2','3'],    label:'Pointer / Pen / Eraser',  role:'all' },
+  { group:'Tools',                     keys:['T'],            label:'Token stamper',           role:'gm' },
+  { group:'Tools',                     keys:['Space'],        label:'Hold to pan',             role:'all' },
+  { group:'Tools',                     keys:['Esc'],          label:'Exit tool / clear select',role:'all' },
+  { group:'Tools',                     keys:['Alt'],          label:'Hold + hover: preview card', role:'all' },
+];
+
+// Tracks what the mouse is currently over, for hover-context keybinds.
+let hoverInfo = null;
+
 // =================== Inline SVG icons ===================
 // Self-contained icon set (no font dependency). Stroke-based, scales to currentColor.
 const ICONS = {
@@ -53,6 +79,8 @@ const ICONS = {
   save:           '<svg viewBox="0 0 24 24"><path d="M5 3 L17 3 L21 7 L21 21 L5 21 Z"/><path d="M7 3 L7 9 L15 9 L15 3 M7 14 L17 14 L17 21 L7 21 Z"/></svg>',
   load:           '<svg viewBox="0 0 24 24"><path d="M4 5 L10 5 L12 7 L20 7 L20 19 L4 19 Z"/></svg>',
   refresh:        '<svg viewBox="0 0 24 24"><path d="M3 12 A9 9 0 0 1 19 6"/><path d="M21 4 L21 9 L16 9"/><path d="M21 12 A9 9 0 0 1 5 18"/><path d="M3 20 L3 15 L8 15"/></svg>',
+  stamp:          '<svg viewBox="0 0 24 24"><path d="M9 3 L15 3 L14 10 L16 10 L16 14 L8 14 L8 10 L10 10 Z"/><path d="M4 18 L20 18 L20 21 L4 21 Z"/></svg>',
+  help:           '<svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><path d="M9.2 9.2 A2.8 2.8 0 1 1 12 13 L12 15"/><circle cx="12" cy="18.5" r="0.6" fill="currentColor"/></svg>',
 };
 
 function icon(name, opts) {
@@ -1065,7 +1093,7 @@ function renderDeckStacks() {
   c.innerHTML = '';
   for (const t of DECK_TYPES) {
     const count = ROLE==='gm' ? s.decks[t].length : s.decks[t];
-    const stack = el('div', { class:'deck-stack', title: `${DECK_LABELS[t]} (${count})` });
+    const stack = el('div', { class:'deck-stack', title: `${DECK_LABELS[t]} (${count})`, 'data-deck': t });
     const backCard = CARDS_BY_TYPE[t][0];
     if (count > 0 && backCard) {
       const bimg = el('img', { class:'card-img', draggable:'false' });
@@ -1087,7 +1115,7 @@ function renderDeckStacks() {
     dc.innerHTML = '';
     for (const t of DECK_TYPES) {
       const arr = s.discards[t]; const top = arr[arr.length-1];
-      const stack = el('div', { class:'deck-stack discard' });
+      const stack = el('div', { class:'deck-stack discard', 'data-deck': t });
       if (top) {
         const dimg = el('img', { class:'card-img' });
         dimg.style.background = 'var(--panel)';
@@ -1993,6 +2021,24 @@ function setupTableInteraction() {
     }
   });
 
+  // Token stamper — capture-phase so a click always stamps (never starts a drag/lasso)
+  stage.addEventListener('mousedown', e => {
+    if (!stampMode || e.button !== 0 || spaceHeld) return;
+    e.preventDefault(); e.stopPropagation();
+    stampAt(e.clientX, e.clientY);
+  }, true);
+  // Ghost follows the cursor while stamping
+  stage.addEventListener('mousemove', e => {
+    if (!stampMode || !stampGhost) return;
+    const tc = $('#tableContent'); if (!tc) return;
+    const cr = tc.getBoundingClientRect();
+    const x = (e.clientX - cr.left) / tableZoom - stampSize / 2;
+    const y = (e.clientY - cr.top)  / tableZoom - stampSize / 2;
+    stampGhost.style.display = 'block';
+    stampGhost.style.left = x + 'px';
+    stampGhost.style.top  = y + 'px';
+  });
+
   // Wheel zoom (centered on cursor)
   stage.addEventListener('wheel', e => {
     e.preventDefault();
@@ -2063,9 +2109,72 @@ function setupTableInteraction() {
   });
   window.addEventListener('blur', () => { finishStroke(); spaceHeld = false; isPanning = false; });
 
-  // Escape = clear selection
+  // Escape = clear selection / exit stamper
   window.addEventListener('keydown', e => {
-    if (e.key === 'Escape') { selectionSet.clear(); $$('.ctx-menu').forEach(m => m.remove()); rerenderAll(); }
+    if (e.key === 'Escape') {
+      if (stampMode) { setTool('pointer'); return; }
+      selectionSet.clear(); $$('.ctx-menu').forEach(m => m.remove()); rerenderAll();
+    }
+  });
+
+  // Hover tracker — what is the mouse currently over? (for hover-context keybinds)
+  document.addEventListener('mousemove', e => {
+    const t = e.target;
+    const deck = t.closest && t.closest('.deck-stack');
+    const fig  = t.closest && t.closest('.figurine');
+    const card = t.closest && t.closest('.placed-card');
+    if (deck && deck.dataset.deck) hoverInfo = { kind:'deck', deck: deck.dataset.deck, discard: deck.classList.contains('discard') };
+    else if (fig && fig.dataset.instId)  hoverInfo = { kind:'figurine', instId: fig.dataset.instId };
+    else if (card && card.dataset.instId) hoverInfo = { kind:'card', instId: card.dataset.instId };
+    else hoverInfo = null;
+  });
+
+  // Global hover-context keybinds
+  window.addEventListener('keydown', e => {
+    if (e.target.matches && e.target.matches('input,textarea,select')) return;
+    if (e.ctrlKey || e.metaKey || e.altKey) return;
+    const k = e.key.length === 1 ? e.key.toLowerCase() : e.key;
+    const s = activeState();
+
+    // Global: tools (all roles)
+    if (k === '1') return setTool('pointer');
+    if (k === '2') return setTool('pen');
+    if (k === '3') return setTool('eraser');
+    if (k === 't' && ROLE === 'gm') { setTool(stampMode ? 'pointer' : 'stamp'); return; }
+
+    if (!hoverInfo || !s) return;
+
+    // Deck hover (GM only)
+    if (hoverInfo.kind === 'deck' && ROLE === 'gm') {
+      if (k === 's') { sendOp({ type:'shuffle-deck', deck: hoverInfo.deck }); e.preventDefault(); }
+      else if (k === 'd') { sendOp({ type:'draw', deck: hoverInfo.deck, to:'table' }); e.preventDefault(); }
+      else if (k === 'g') { sendOp({ type:'draw', deck: hoverInfo.deck, to:'gm' }); e.preventDefault(); }
+      return;
+    }
+
+    // Figurine hover
+    if (hoverInfo.kind === 'figurine') {
+      const f = s.table.figurines.find(x => x.instId === hoverInfo.instId); if (!f) return;
+      if (f.locked && ROLE !== 'gm') return;
+      if (k === 'f') sendOp({ type:'move-figurine', instId:f.instId, flipH: !f.flipH });
+      else if (k === 'r') sendOp({ type:'move-figurine', instId:f.instId, rot: ((f.rot||0)+90)%360 });
+      else if (k === '[') sendOp({ type:'move-figurine', instId:f.instId, sendToBack:true });
+      else if (k === ']') sendOp({ type:'move-figurine', instId:f.instId, bringToFront:true });
+      else if (k === 'l' && ROLE === 'gm') sendOp({ type:'move-figurine', instId:f.instId, locked: !f.locked });
+      else if (k === 'e' && ROLE === 'gm') sendOp({ type:'duplicate-figurine', instId:f.instId });
+      else if ((k === 'Delete' || k === 'Backspace') && ROLE === 'gm') sendOp({ type:'remove-figurine', instId:f.instId });
+      return;
+    }
+
+    // Table card hover
+    if (hoverInfo.kind === 'card') {
+      const c = s.table.cards.find(x => x.instId === hoverInfo.instId); if (!c) return;
+      if (c.locked && ROLE !== 'gm') return;
+      if (k === 'f') sendOp({ type:'flip-card', where:'table', instId:c.instId });
+      else if (k === 'l' && ROLE === 'gm') sendOp({ type:'lock-table-card', instId:c.instId });
+      else if ((k === 'Delete' || k === 'Backspace') && ROLE === 'gm') sendOp({ type:'transfer-card', from:{ where:'table', instId:c.instId }, to:{ where:'discard' } });
+      return;
+    }
   });
 
   // Lasso-select: drag on empty table area to rubber-band select figurines/cards
@@ -2185,6 +2294,132 @@ function setTool(t) {
     canvas.style.zIndex = drawing ? '999999' : 'auto';
     canvas.style.cursor = t === 'pen' ? 'crosshair' : t === 'eraser' ? 'cell' : 'default';
   }
+  // Enter/exit token stamper mode
+  if (t === 'stamp') enterStampMode();
+  else if (stampMode) exitStampMode();
+}
+
+// =================== Token Stamper (GM only) ===================
+let stampMode = false;
+let stampCat = null, stampSub = '*', stampSize = 120;
+let stampGhost = null, stampNextToken = null;
+const STAMP_PRESETS = { S:80, M:120, L:200, XL:320 };
+
+function stampCategories() {
+  const set = new Set();
+  for (const t of Object.values(TOKENS_BY_ID)) if (t.cats[0]) set.add(t.cats[0]);
+  return [...set].sort();
+}
+function stampSubcategories(cat) {
+  const set = new Set();
+  for (const t of Object.values(TOKENS_BY_ID)) if (t.cats[0] === cat && t.cats[1]) set.add(t.cats[1]);
+  return [...set].sort();
+}
+function pickStampToken() {
+  const pool = Object.values(TOKENS_BY_ID).filter(t =>
+    t.cats[0] === stampCat && (stampSub === '*' || t.cats[1] === stampSub));
+  return pool.length ? pool[(Math.random() * pool.length) | 0] : null;
+}
+function updateStampGhostImage() {
+  if (!stampGhost) return;
+  const img = stampGhost.querySelector('img');
+  if (stampNextToken) loadAssetAsDataUrl(stampNextToken.path).then(url => { if (url && img) img.src = url; });
+  else if (img) img.removeAttribute('src');
+}
+function refreshStampPool() {
+  stampNextToken = pickStampToken();
+  updateStampGhostImage();
+}
+
+function enterStampMode() {
+  if (ROLE !== 'gm' || stampMode) return;
+  stampMode = true;
+  if (!stampCat) stampCat = stampCategories()[0] || null;
+  refreshStampPool();
+  buildStampPanel();
+  // Ghost element lives inside the transformed table content
+  const tc = $('#tableContent');
+  stampGhost = el('div', { id:'stampGhost' });
+  stampGhost.appendChild(el('img', { draggable:'false' }));
+  stampGhost.style.display = 'none';
+  if (tc) tc.appendChild(stampGhost);
+  updateStampGhostImage();
+}
+
+function exitStampMode() {
+  stampMode = false;
+  $('#stampPanel')?.remove();
+  stampGhost?.remove(); stampGhost = null;
+}
+
+function buildStampPanel() {
+  $('#stampPanel')?.remove();
+  const panel = el('div', { id:'stampPanel' });
+
+  panel.appendChild(el('span', { class:'sp-label' }, 'Stamp'));
+
+  const catSel = el('select');
+  for (const c of stampCategories()) catSel.appendChild(el('option', { value:c, selected: c === stampCat }, c));
+  catSel.addEventListener('change', () => { stampCat = catSel.value; stampSub = '*'; fillSubs(); refreshStampPool(); });
+  panel.appendChild(catSel);
+
+  const subSel = el('select');
+  function fillSubs() {
+    subSel.innerHTML = '';
+    subSel.appendChild(el('option', { value:'*' }, 'All'));
+    for (const sc of stampSubcategories(stampCat)) subSel.appendChild(el('option', { value:sc }, sc));
+    subSel.value = stampSub;
+  }
+  fillSubs();
+  subSel.addEventListener('change', () => { stampSub = subSel.value; refreshStampPool(); });
+  panel.appendChild(subSel);
+
+  panel.appendChild(el('span', { class:'sp-label' }, 'Size'));
+  const sizeBtns = {};
+  const slider = el('input', { type:'range', min:'40', max:'400', value:String(stampSize) });
+  const sizeVal = el('span', { class:'sp-hint' }, stampSize + 'px');
+  function setSize(px, fromSlider) {
+    stampSize = px;
+    if (!fromSlider) slider.value = String(px);
+    sizeVal.textContent = px + 'px';
+    for (const [k, b] of Object.entries(sizeBtns)) b.classList.toggle('active', STAMP_PRESETS[k] === px);
+    if (stampGhost) { stampGhost.style.width = px + 'px'; stampGhost.style.height = px + 'px'; }
+  }
+  for (const [k, px] of Object.entries(STAMP_PRESETS)) {
+    const b = el('button', { class:'tool-btn sp-size-btn' }, k);
+    b.addEventListener('click', () => setSize(px, false));
+    sizeBtns[k] = b; panel.appendChild(b);
+  }
+  slider.addEventListener('input', () => setSize(parseInt(slider.value, 10), true));
+  panel.appendChild(slider);
+  panel.appendChild(sizeVal);
+
+  panel.appendChild(el('span', { class:'sp-hint' }, '· Click map to stamp · Esc to exit'));
+  const closeBtn = el('button', { class:'tool-btn', title:'Exit stamper' });
+  closeBtn.appendChild(icon('close'));
+  closeBtn.addEventListener('click', () => setTool('pointer'));
+  panel.appendChild(closeBtn);
+
+  document.body.appendChild(panel);
+  setSize(stampSize, false);
+}
+
+async function stampAt(clientX, clientY) {
+  const tc = $('#tableContent'); if (!tc) return;
+  const cr = tc.getBoundingClientRect();
+  const x = Math.round((clientX - cr.left) / tableZoom - stampSize / 2);
+  const y = Math.round((clientY - cr.top)  / tableZoom - stampSize / 2);
+  const tok = stampNextToken || pickStampToken(); if (!tok) return;
+  const dataUrl = await loadAssetAsDataUrl(tok.path); if (!dataUrl) return;
+  const hash = await hashBlob(dataUrl);
+  ASSETS[hash] = dataUrl;
+  PATH_TO_HASH[tok.path] = hash;
+  if (ROLE === 'gm' && !STATE.assetMeta[hash]) {
+    STATE.assetMeta[hash] = { kind:'figurine', size:dataUrl.length, path:tok.path };
+    for (const c of Object.values(connections)) sendAsset(c, hash, dataUrl, 'figurine');
+  }
+  sendOp({ type:'add-figurine', hash, x, y, w:stampSize, h:stampSize, label:tok.name });
+  refreshStampPool();                          // new random pick for the next stamp + ghost
 }
 
 // =================== Asset upload ===================
@@ -2441,6 +2676,7 @@ async function boot() {
   setupTableInteraction();
   setupFloatingPanels();
   setupAltPreview();
+  setupKeybindHelp();
   if (activeState()) renderTable();
   if (ROLE === 'gm') {
     await setupAssetsFolder();
@@ -2451,6 +2687,36 @@ async function boot() {
 }
 
 // =================== Alt-hover card preview ===================
+// =================== Keybind help (? icon) ===================
+function setupKeybindHelp() {
+  const btn = el('div', { id:'kbHelpBtn', title:'Keyboard shortcuts' });
+  btn.appendChild(icon('help'));
+  const panel = el('div', { id:'kbHelpPanel' });
+  panel.appendChild(el('div', { class:'kbHelp-title' }, 'Keyboard Shortcuts'));
+  // Group the role-appropriate rows
+  const groups = {};
+  for (const b of KEYBIND_HELP) {
+    if (b.role === 'gm' && ROLE !== 'gm') continue;
+    (groups[b.group] = groups[b.group] || []).push(b);
+  }
+  for (const [name, rows] of Object.entries(groups)) {
+    panel.appendChild(el('div', { class:'kbHelp-group' }, name));
+    for (const r of rows) {
+      const row = el('div', { class:'kbHelp-row' });
+      const keys = el('div', { class:'kbHelp-keys' });
+      r.keys.forEach((kk, i) => {
+        keys.appendChild(el('kbd', {}, kk));
+        if (i < r.keys.length - 1) keys.appendChild(el('span', { class:'kbHelp-sep' }, '/'));
+      });
+      row.appendChild(keys);
+      row.appendChild(el('div', { class:'kbHelp-label' }, r.label));
+      panel.appendChild(row);
+    }
+  }
+  btn.appendChild(panel);
+  document.body.appendChild(btn);
+}
+
 let altDown = false;
 let hoverImg = null;
 function setupAltPreview() {
@@ -2780,6 +3046,10 @@ function setupToolbarUI() {
     bmBtn.appendChild(el('span', {}, 'Battlemaps'));
     bmBtn.addEventListener('click', openBattlemapBrowser);
     tb.appendChild(bmBtn);
+    const stampBtn = el('button', { class:'tool-btn', 'data-tool':'stamp', title:'Token stamper (T)', onclick:() => setTool(stampMode ? 'pointer' : 'stamp') });
+    stampBtn.appendChild(icon('stamp'));
+    stampBtn.appendChild(el('span', {}, 'Stamp'));
+    tb.appendChild(stampBtn);
     const mapBtn = el('label', { class:'tool-btn', title:'Upload a battle map' });
     mapBtn.appendChild(icon('map'));
     mapBtn.appendChild(el('span', {}, 'Map'));
