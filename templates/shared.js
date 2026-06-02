@@ -2320,8 +2320,10 @@ function stampSubcategories(cat) {
   return [...set].sort();
 }
 function pickStampToken() {
+  const anyCat = stampCat === '*';
   const pool = Object.values(TOKENS_BY_ID).filter(t =>
-    t.cats[0] === stampCat && (stampSub === '*' || t.cats[1] === stampSub));
+    (anyCat || t.cats[0] === stampCat) &&
+    (anyCat || stampSub === '*' || t.cats[1] === stampSub));
   return pool.length ? pool[(Math.random() * pool.length) | 0] : null;
 }
 function updateStampGhostImage() {
@@ -2363,6 +2365,7 @@ function buildStampPanel() {
   panel.appendChild(el('span', { class:'sp-label' }, 'Stamp'));
 
   const catSel = el('select');
+  catSel.appendChild(el('option', { value:'*', selected: stampCat === '*' }, '🎲 Random (all)'));
   for (const c of stampCategories()) catSel.appendChild(el('option', { value:c, selected: c === stampCat }, c));
   catSel.addEventListener('change', () => { stampCat = catSel.value; stampSub = '*'; fillSubs(); refreshStampPool(); });
   panel.appendChild(catSel);
@@ -2371,8 +2374,9 @@ function buildStampPanel() {
   function fillSubs() {
     subSel.innerHTML = '';
     subSel.appendChild(el('option', { value:'*' }, 'All'));
-    for (const sc of stampSubcategories(stampCat)) subSel.appendChild(el('option', { value:sc }, sc));
+    if (stampCat !== '*') for (const sc of stampSubcategories(stampCat)) subSel.appendChild(el('option', { value:sc }, sc));
     subSel.value = stampSub;
+    subSel.disabled = (stampCat === '*');   // subcategory is meaningless when category is random
   }
   fillSubs();
   subSel.addEventListener('change', () => { stampSub = subSel.value; refreshStampPool(); });
