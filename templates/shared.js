@@ -86,6 +86,7 @@ const ICONS = {
   refresh:        '<svg viewBox="0 0 24 24"><path d="M3 12 A9 9 0 0 1 19 6"/><path d="M21 4 L21 9 L16 9"/><path d="M21 12 A9 9 0 0 1 5 18"/><path d="M3 20 L3 15 L8 15"/></svg>',
   stamp:          '<svg viewBox="0 0 24 24"><path d="M9 3 L15 3 L14 10 L16 10 L16 14 L8 14 L8 10 L10 10 Z"/><path d="M4 18 L20 18 L20 21 L4 21 Z"/></svg>',
   help:           '<svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><path d="M9.2 9.2 A2.8 2.8 0 1 1 12 13 L12 15"/><circle cx="12" cy="18.5" r="0.6" fill="currentColor"/></svg>',
+  zone:           '<svg viewBox="0 0 24 24"><rect x="3" y="3" width="18" height="18" rx="2" stroke-dasharray="3 3"/><circle cx="12" cy="12" r="3" fill="currentColor"/></svg>',
 };
 
 function icon(name, opts) {
@@ -210,22 +211,54 @@ function deleteBoard(id) {
   if (STATE.gmViewBoardId === id) gmSwitchView(STATE.boards[0].id);
   else { renderBoardBar(); autosave(); }
 }
-function activateBoard(id) {        // make a board the live one players see
-  const dest = boardById(id).table;
-  // Player character tokens travel to the newly-activated board (one per player).
-  const chars = {};
-  for (const b of STATE.boards) {
-    b.table.figurines = b.table.figurines.filter(f => {
-      if (f.kind === 'character') { if (!chars[f.playerId]) chars[f.playerId] = f; return false; }
-      return true;
-    });
+// A spawn point inside a board's zone (scattered, non-overlapping) or near board center.
+function pickSpawnPoint(board, placed) {
+  const size = 80; // character token size
+  const zone = board.spawnZone;
+  const farEnough = (x, y) => placed.every(p => Math.hypot((x + size/2) - (p.x + p.w/2), (y + size/2) - (p.y + p.h/2)) > size * 0.9);
+  if (zone && zone.w > size && zone.h > size) {
+    for (let i = 0; i < 30; i++) {
+      const x = zone.x + Math.random() * (zone.w - size);
+      const y = zone.y + Math.random() * (zone.h - size);
+      if (farEnough(x, y)) return { x: Math.round(x), y: Math.round(y) };
+    }
+    return { x: Math.round(zone.x + Math.random() * (zone.w - size)), y: Math.round(zone.y + Math.random() * (zone.h - size)) };
   }
-  for (const f of Object.values(chars)) dest.figurines.push(f);
+  // No zone → near the center of the current view, with a little scatter
+  const stage = $('#tableStage'); const r = stage ? stage.getBoundingClientRect() : { width: 1000, height: 700 };
+  const ccx = (r.width / 2 - tablePanX) / tableZoom, ccy = (r.height / 2 - tablePanY) / tableZoom;
+  for (let i = 0; i < 30; i++) {
+    const x = ccx - 120 + Math.random() * 240, y = ccy - 120 + Math.random() * 240;
+    if (farEnough(x, y)) return { x: Math.round(x - size/2), y: Math.round(y - size/2) };
+  }
+  return { x: Math.round(ccx), y: Math.round(ccy) };
+}
+// Ensure every connected player has a character token on the given board.
+// First entry → spawn at the board's zone/center; returning → keep last position. Chars go on top.
+function ensureCharactersOnBoard(boardId) {
+  const board = boardById(boardId); const tbl = board.table;
+  const placed = tbl.figurines.filter(f => f.kind === 'character');
+  for (const pid of Object.keys(connections)) {
+    if (pid === 'gm') continue;
+    if (!connections[pid]?.open) continue;
+    let ch = tbl.figurines.find(f => f.kind === 'character' && f.playerId === pid);
+    if (!ch) {
+      const pt = pickSpawnPoint(board, placed);
+      ch = { instId: uid(), kind:'character', playerId: pid, x: pt.x, y: pt.y, w: 80, h: 80,
+        rot: 0, z: nextZ(), opacity: 1, locked: false, flipH:false, flipV:false,
+        label: STATE.hands[pid]?.name || pid, effects: {} };
+      tbl.figurines.push(ch); placed.push(ch);
+    }
+    ch.z = nextZ(); // characters always on the top-most layer
+  }
+}
+function activateBoard(id) {        // make a board the live one players see
   STATE.activeBoardId = id;
+  ensureCharactersOnBoard(id);      // first-time players spawn in the zone; returning keep position; chars on top
   logEntry('GM', 'activated board: ' + boardById(id).name, 'sys');
   broadcast({ type: 'state' });     // players switch to the new active board
-  renderAllGM();                    // GM view may have changed (char tokens moved)
-  autosave();
+  renderAllGM();
+  autosaveNow();
 }
 function renderBoardBar() {
   if (ROLE !== 'gm') return;
@@ -851,15 +884,15 @@ function handleFromGM(data) {
 }
 
 function ensureCharacterToken(playerId) {
-  // GM only: make sure each player has exactly one character token on the LIVE board.
+  // GM only: make sure this player has a character token on the LIVE board.
   if (ROLE !== 'gm' || !STATE) return;
-  const tbl = boardById(STATE.activeBoardId).table;
-  const existing = tbl.figurines.find(f => f.kind === 'character' && f.playerId === playerId);
-  if (existing) return; // already present, render() will pick up current pfp
-  const baseX = 400 + (parseInt(playerId.slice(6),10) - 1) * 90;
+  const board = boardById(STATE.activeBoardId); const tbl = board.table;
+  if (tbl.figurines.some(f => f.kind === 'character' && f.playerId === playerId)) return;
+  const placed = tbl.figurines.filter(f => f.kind === 'character');
+  const pt = pickSpawnPoint(board, placed);
   tbl.figurines.push({
     instId: uid(), kind:'character', playerId,
-    x: baseX, y: 500, w: 80, h: 80, rot: 0, z: nextZ(),
+    x: pt.x, y: pt.y, w: 80, h: 80, rot: 0, z: nextZ(),
     opacity: 1, locked: false, flipH:false, flipV:false,
     label: STATE.hands[playerId]?.name || playerId,
     effects: {},
@@ -914,9 +947,15 @@ const TABLE_OPS = new Set(['draw','flip-card','move-table-card','lock-table-card
   'add-figurine','move-figurine','remove-figurine','duplicate-figurine','clear-drawings',
   'clear-my-drawings','undo-drawing','add-drawing','remove-drawing','set-group',
   'set-figurine-vitals','toggle-effect','set-figurine-label']);
-function applyOp(op, by) {
+function applyOp(op, by, silent) {
   if (ROLE !== 'gm') return;
   const s = STATE;
+  // Batch: apply each sub-op's mutation, then one broadcast + render + autosave.
+  if (op.type === 'batch') {
+    for (const sub of (op.ops || [])) applyOp(sub, by, true);
+    if (!silent) { broadcast({ type:'state' }); renderAllGM(); autosave(); }
+    return;
+  }
   const prevTable = s.table;
   if (by !== 'gm' && s.boards && TABLE_OPS.has(op.type)) s.table = boardById(s.activeBoardId).table;
   try {
@@ -951,6 +990,7 @@ function applyOp(op, by) {
       const c = s.table.cards.find(c => c.instId === op.instId); if (!c) return;
       if (c.locked && by !== 'gm') return;
       c.x = op.x; c.y = op.y; c.z = nextZ();
+      if (silent) break;   // batched: mutate only, caller broadcasts/renders once
       // In-place update — no destroy/recreate flash
       const domCard = document.querySelector(`[data-inst-id="${op.instId}"]`);
       if (domCard) { domCard.style.left = c.x + 'px'; domCard.style.top = c.y + 'px'; domCard.style.zIndex = c.z; }
@@ -1050,7 +1090,7 @@ function applyOp(op, by) {
         op.w == null && op.h == null && op.rot == null && op.locked == null &&
         op.opacity == null && op.flipH == null && op.flipV == null && op.label == null &&
         !op.bringToFront && !op.sendToBack;
-      if (isDrag) {
+      if (isDrag && !silent) {
         const domFig = document.querySelector(`[data-inst-id="${op.instId}"]`);
         if (domFig) { domFig.style.left = f.x + 'px'; domFig.style.top = f.y + 'px'; }
         broadcastMovePatch({ kind:'figurine', instId:op.instId, x:f.x, y:f.y, z:f.z });
@@ -1101,6 +1141,7 @@ function applyOp(op, by) {
       if (!s.chat) s.chat = [];
       s.chat.push({ who: op.who, text: op.text, color: op.color || 'var(--text)', ts: op.ts || Date.now() });
       if (s.chat.length > 200) s.chat.splice(0, s.chat.length - 200);
+      if (silent) return;
       // Don't rerenderAll for chat — just update the chat panel
       broadcast({ type:'state' });
       renderAllGM();
@@ -1115,6 +1156,7 @@ function applyOp(op, by) {
     }
     case 'set-gm-notes': {
       s.gmNotes = op.text || '';
+      if (silent) return;
       // GM notes are local — no broadcast needed, but we autosave
       autosave();
       return;
@@ -1123,6 +1165,7 @@ function applyOp(op, by) {
   } finally {
     s.table = prevTable;   // restore the GM-viewed board reference before any render
   }
+  if (silent) return;
   broadcast({ type:'state' });
   renderAllGM();
   autosave();
@@ -1132,13 +1175,22 @@ function applyOp(op, by) {
 // Serialize STATE without the duplicated top-level `table` reference (boards[] is the
 // source of truth; STATE.table is rebuilt from gmViewBoardId on load).
 function snapshotState() { const { table, ...rest } = STATE; return rest; }
-function autosave() {
-  if (ROLE !== 'gm') return;
+// Immediate write — serializes STATE + ASSETS (can be multi-MB).
+function autosaveNow() {
+  if (ROLE !== 'gm' || !STATE) return;
   try {
     const snap = { state: snapshotState(), assets: ASSETS };
     localStorage.setItem('deckquest-session-' + STATE.roomCode, JSON.stringify(snap));
     localStorage.setItem('deckquest-last-room', STATE.roomCode);
   } catch (e) { console.warn('autosave failed (storage full?)', e); }
+}
+// Debounced — coalesce a burst of ops (e.g. a 7-token group edit) into one write,
+// so we don't JSON.stringify all the base64 assets on every single op.
+let _autosaveTimer = null;
+function autosave() {
+  if (ROLE !== 'gm') return;
+  clearTimeout(_autosaveTimer);
+  _autosaveTimer = setTimeout(autosaveNow, 600);
 }
 function downloadSession() {
   const snap = { state: snapshotState(), assets: ASSETS };
@@ -1216,6 +1268,7 @@ function renderTable() {
   renderTableCards();
   renderFigurines();
   renderDrawings();
+  renderSpawnZone();
 }
 function renderDeckStacks() {
   const s = activeState();
@@ -1404,12 +1457,13 @@ function renderFigurines() {
             window.removeEventListener('mousemove', onMove);
             window.removeEventListener('mouseup', onUp);
             const sz = Math.round(ns);
-            sendOp({ type:'move-figurine', instId:f.instId, x: Math.round(cx - sz/2), y: Math.round(cy - sz/2), w: sz, h: sz });
             const factor = ns / Math.max(f.w, f.h);
+            const ops = [{ type:'move-figurine', instId:f.instId, x: Math.round(cx - sz/2), y: Math.round(cy - sz/2), w: sz, h: sz }];
             for (const o of others) {
               const os = Math.max(40, Math.round(o.w0 * factor));
-              sendOp({ type:'move-figurine', instId:o.g.instId, x: Math.round(o.cx - os/2), y: Math.round(o.cy - os/2), w: os, h: os });
+              ops.push({ type:'move-figurine', instId:o.g.instId, x: Math.round(o.cx - os/2), y: Math.round(o.cy - os/2), w: os, h: os });
             }
+            sendBatch(ops);
           };
           window.addEventListener('mousemove', onMove);
           window.addEventListener('mouseup', onUp);
@@ -1769,10 +1823,9 @@ function showCardContextMenu(info, e) {
     items.push({ label: `🗑 Discard all ${n}`, action: () => {
       if (!confirm(`Discard ${n} selected items?`)) return;
       const s = activeState();
-      for (const id of [...selectionSet]) {
-        if (s.table.cards.find(x => x.instId === id)) sendOp({ type:'transfer-card', from:{where:'table',instId:id}, to:{where:'discard'} });
-        else if (s.table.figurines.find(x => x.instId === id)) sendOp({ type:'remove-figurine', instId:id });
-      }
+      sendBatch([...selectionSet].map(id =>
+        s.table.cards.find(x => x.instId === id) ? { type:'transfer-card', from:{where:'table',instId:id}, to:{where:'discard'} }
+        : s.table.figurines.find(x => x.instId === id) ? { type:'remove-figurine', instId:id } : null).filter(Boolean));
       selectionSet.clear();
     }});
     items.push({ label: `✕ Deselect all`, action: () => { selectionSet.clear(); rerenderAll(); }});
@@ -1853,7 +1906,19 @@ function selFigs(f) {
   return [f];
 }
 // Apply a move-figurine edit to every affected figurine (fn computes per-figurine fields).
-function figEdit(f, fn) { for (const t of selFigs(f)) sendOp({ type:'move-figurine', instId:t.instId, ...fn(t) }); }
+// One batch op → one broadcast/render instead of N.
+function figEdit(f, fn) {
+  const ops = selFigs(f).map(t => ({ type:'move-figurine', instId:t.instId, ...fn(t) }));
+  sendOp(ops.length === 1 ? ops[0] : { type:'batch', ops });
+}
+// Build the right move op for an instId (figurine vs table card).
+function moveOpFor(instId, x, y) {
+  const s = activeState();
+  const isFig = s && s.table.figurines.some(f => f.instId === instId);
+  return { type: isFig ? 'move-figurine' : 'move-table-card', instId, x: Math.round(x), y: Math.round(y) };
+}
+// Send many ops as one batch (one broadcast/render) — or a single op directly.
+function sendBatch(ops) { if (ops.length) sendOp(ops.length === 1 ? ops[0] : { type:'batch', ops }); }
 // Center-anchored scale fields for a figurine.
 function scaleFields(t, factor) {
   const cx = t.x + t.w/2, cy = t.y + t.h/2;
@@ -1875,18 +1940,17 @@ function showFigurineContextMenu(f, e) {
     items.push({ label: `🗑 Delete all ${n}`, action: () => {
       if (!confirm(`Delete ${n} selected items?`)) return;
       const s = activeState();
-      for (const id of [...selectionSet]) {
-        if (s.table.figurines.find(x => x.instId === id)) sendOp({ type:'remove-figurine', instId:id });
-        else if (s.table.cards.find(x => x.instId === id)) sendOp({ type:'transfer-card', from:{where:'table',instId:id}, to:{where:'discard'} });
-      }
+      sendBatch([...selectionSet].map(id =>
+        s.table.figurines.find(x => x.instId === id) ? { type:'remove-figurine', instId:id }
+        : s.table.cards.find(x => x.instId === id) ? { type:'transfer-card', from:{where:'table',instId:id}, to:{where:'discard'} } : null).filter(Boolean));
       selectionSet.clear();
     }});
     items.push({ label: `🔒 Toggle lock all ${n}`, action: () => {
       const s = activeState();
-      for (const id of selectionSet) {
+      sendBatch([...selectionSet].map(id => {
         const fig = s.table.figurines.find(x => x.instId === id);
-        if (fig) sendOp({ type:'move-figurine', instId:id, locked:!fig.locked });
-      }
+        return fig ? { type:'move-figurine', instId:id, locked:!fig.locked } : null;
+      }).filter(Boolean));
     }});
     items.push({ label: `✕ Deselect all`, action: () => { selectionSet.clear(); rerenderAll(); }});
     // Make Group / Ungroup
@@ -1914,7 +1978,7 @@ function showFigurineContextMenu(f, e) {
     { label: f.locked ? '🔓 Unlock' : '🔒 Lock', action: () => figEdit(f, t => ({ locked:!t.locked })) },
     { label:'Rename / Label...', action: () => {
         const v = prompt('Label (blank to clear):', f.label || '');
-        if (v != null) for (const t of selFigs(f)) sendOp({ type:'set-figurine-label', instId:t.instId, label: v });
+        if (v != null) sendBatch(selFigs(f).map(t => ({ type:'set-figurine-label', instId:t.instId, label: v })));
       } },
     { label: (f.showName ? '✓ ' : '  ') + 'Show name', action: () => figEdit(f, t => ({ showName: !t.showName })) },
     { label:'❤ Edit HP / Armor...', action: () => showTokenDetailPopup(f, e) },
@@ -1922,7 +1986,7 @@ function showFigurineContextMenu(f, e) {
     // Status effects — toggle each across the selection.
     ...STATUS_EFFECTS.map(([key, label]) => ({
       label: (eff[key] ? '✓ ' : '  ') + label,
-      action: () => { for (const t of selFigs(f)) sendOp({ type:'toggle-effect', instId:t.instId, effect:key }); },
+      action: () => sendBatch(selFigs(f).map(t => ({ type:'toggle-effect', instId:t.instId, effect:key }))),
     })),
     '-',
     { label:'Rotate +15°', action: () => figEdit(f, t => ({ rot:(t.rot||0)+15 })) },
@@ -1957,12 +2021,12 @@ function showFigurineContextMenu(f, e) {
     { label:'Bring to front', action: () => figEdit(f, () => ({ bringToFront: true })) },
     { label:'Send to back', action: () => figEdit(f, () => ({ sendToBack: true })) },
     '-',
-    { label: multi ? 'Duplicate all' : 'Duplicate', action: () => { for (const t of selFigs(f)) sendOp({ type:'duplicate-figurine', instId:t.instId }); } },
+    { label: multi ? 'Duplicate all' : 'Duplicate', action: () => sendBatch(selFigs(f).map(t => ({ type:'duplicate-figurine', instId:t.instId }))) },
     { label:'Reset all transforms', action: () => figEdit(f, () => ({ rot:0, opacity:1, flipH:false, flipV:false, locked:false })) },
     '-',
     { label: multi ? `🗑 Delete all ${selectionSet.size}` : '🗑 Delete', action: () => {
         if (!confirm(multi ? `Delete ${selectionSet.size} selected items?` : 'Delete this image?')) return;
-        for (const t of selFigs(f)) sendOp({ type:'remove-figurine', instId:t.instId });
+        sendBatch(selFigs(f).map(t => ({ type:'remove-figurine', instId:t.instId })));
         selectionSet.clear();
       } },
   );
@@ -2034,12 +2098,10 @@ function copySelection() {
 function pasteClipboard() {
   if (!clipboard.length) return;
   const px = lastMouseTableX, py = lastMouseTableY;
-  for (const it of clipboard) {
-    sendOp({ type:'add-figurine', hash: it.assetHash,
-      x: Math.round(px + it.dx - it.w/2), y: Math.round(py + it.dy - it.h/2),
-      w: it.w, h: it.h, label: it.label, showName: it.showName,
-      rot: it.rot, opacity: it.opacity, flipH: it.flipH, flipV: it.flipV });
-  }
+  sendBatch(clipboard.map(it => ({ type:'add-figurine', hash: it.assetHash,
+    x: Math.round(px + it.dx - it.w/2), y: Math.round(py + it.dy - it.h/2),
+    w: it.w, h: it.h, label: it.label, showName: it.showName,
+    rot: it.rot, opacity: it.opacity, flipH: it.flipH, flipV: it.flipV })));
 }
 function groupSelection() {
   if (selectionSet.size < 2) return;
@@ -2121,21 +2183,20 @@ function makeDraggable(elm, onEnd, instId) {
       window.removeEventListener('mousemove', onMove);
       window.removeEventListener('mouseup', onUp);
       _isDragging = false;
-      onEnd(lastX, lastY);
-      // Optimistic: apply our own move to LOCAL_VIEW now so an unrelated broadcast
-      // arriving before the GM confirms doesn't snap the token back (players only).
-      if (instId) markOptimisticMove(instId, lastX, lastY);
-      // Send ops for group members
       if (groupMembers.length) {
+        // Move the whole group in one batch — single broadcast/render.
         const dx = lastX - x0, dy = lastY - y0;
+        const ops = [moveOpFor(instId, lastX, lastY)];
+        if (instId) markOptimisticMove(instId, lastX, lastY);
         for (const g of groupMembers) {
           const gx = Math.round(g.x0 + dx), gy = Math.round(g.y0 + dy);
-          if (g.kind === 'figurine')
-            sendOp({ type: 'move-figurine', instId: g.instId, x: gx, y: gy });
-          else
-            sendOp({ type: 'move-table-card', instId: g.instId, x: gx, y: gy });
+          ops.push({ type: g.kind === 'figurine' ? 'move-figurine' : 'move-table-card', instId: g.instId, x: gx, y: gy });
           markOptimisticMove(g.instId, gx, gy);
         }
+        sendBatch(ops);
+      } else {
+        onEnd(lastX, lastY);
+        if (instId) markOptimisticMove(instId, lastX, lastY);
       }
     };
     window.addEventListener('mousemove', onMove);
@@ -2244,6 +2305,32 @@ function setupTableInteraction() {
     e.preventDefault(); e.stopPropagation();
     stampAt(e.clientX, e.clientY);
   }, true);
+
+  // Spawn-zone tool — capture-phase rectangle drag sets the viewed board's zone.
+  stage.addEventListener('mousedown', e => {
+    if (!spawnZoneMode || e.button !== 0 || spaceHeld) return;
+    const onTable = e.target === stage || (e.target.closest && e.target.closest('#tableContent'));
+    if (!onTable) return;
+    e.preventDefault(); e.stopPropagation();
+    const tc = $('#tableContent'); const cr = tc.getBoundingClientRect();
+    const sx = (e.clientX - cr.left)/tableZoom, sy = (e.clientY - cr.top)/tableZoom;
+    const draft = el('div', { id:'spawnZoneDraft' }); tc.appendChild(draft);
+    const bounds = ev => {
+      const cx = (ev.clientX - cr.left)/tableZoom, cy = (ev.clientY - cr.top)/tableZoom;
+      return { x: Math.min(sx,cx), y: Math.min(sy,cy), w: Math.abs(cx-sx), h: Math.abs(cy-sy) };
+    };
+    const onMove = ev => { const b = bounds(ev); draft.style.cssText = `left:${b.x}px;top:${b.y}px;width:${b.w}px;height:${b.h}px;`; };
+    const onUp = ev => {
+      window.removeEventListener('mousemove', onMove); window.removeEventListener('mouseup', onUp);
+      draft.remove();
+      const b = bounds(ev);
+      if (b.w > 20 && b.h > 20) {
+        boardById(STATE.gmViewBoardId).spawnZone = { x:Math.round(b.x), y:Math.round(b.y), w:Math.round(b.w), h:Math.round(b.h) };
+        renderTable(); autosave();
+      }
+    };
+    window.addEventListener('mousemove', onMove); window.addEventListener('mouseup', onUp);
+  }, true);
   // Ghost follows the cursor while stamping
   stage.addEventListener('mousemove', e => {
     if (!stampMode || !stampGhost) return;
@@ -2330,7 +2417,7 @@ function setupTableInteraction() {
   // Escape = clear selection / exit stamper
   window.addEventListener('keydown', e => {
     if (e.key === 'Escape') {
-      if (stampMode) { setTool('pointer'); return; }
+      if (stampMode || spawnZoneMode) { setTool('pointer'); return; }
       selectionSet.clear(); $$('.ctx-menu').forEach(m => m.remove()); rerenderAll();
     }
   });
@@ -2379,8 +2466,8 @@ function setupTableInteraction() {
       else if (k === '[') figEdit(f, () => ({ sendToBack:true }));
       else if (k === ']') figEdit(f, () => ({ bringToFront:true }));
       else if (k === 'l' && ROLE === 'gm') figEdit(f, t => ({ locked: !t.locked }));
-      else if (k === 'e' && ROLE === 'gm') { for (const t of selFigs(f)) sendOp({ type:'duplicate-figurine', instId:t.instId }); }
-      else if ((k === 'Delete' || k === 'Backspace') && ROLE === 'gm') { for (const t of selFigs(f)) sendOp({ type:'remove-figurine', instId:t.instId }); }
+      else if (k === 'e' && ROLE === 'gm') sendBatch(selFigs(f).map(t => ({ type:'duplicate-figurine', instId:t.instId })));
+      else if ((k === 'Delete' || k === 'Backspace') && ROLE === 'gm') sendBatch(selFigs(f).map(t => ({ type:'remove-figurine', instId:t.instId })));
       return;
     }
 
@@ -2525,6 +2612,41 @@ function setTool(t) {
   // Enter/exit token stamper mode
   if (t === 'stamp') enterStampMode();
   else if (stampMode) exitStampMode();
+  // Enter/exit spawn-zone mode
+  if (t === 'spawnzone') enterSpawnZoneMode();
+  else if (spawnZoneMode) exitSpawnZoneMode();
+}
+
+// =================== Spawn-zone tool (GM only) ===================
+let spawnZoneMode = false;
+function enterSpawnZoneMode() {
+  if (ROLE !== 'gm' || spawnZoneMode) return;
+  spawnZoneMode = true;
+  $('#spawnZonePanel')?.remove();
+  const panel = el('div', { id:'spawnZonePanel' });
+  panel.appendChild(el('span', { class:'sp-label' }, 'Spawn Zone'));
+  panel.appendChild(el('span', { class:'sp-hint' }, 'Drag on the map to set where characters first appear · Esc to exit'));
+  const clr = el('button', { class:'tool-btn' }, 'Clear zone');
+  clr.addEventListener('click', () => { delete boardById(STATE.gmViewBoardId).spawnZone; renderTable(); autosave(); });
+  panel.appendChild(clr);
+  const close = el('button', { class:'tool-btn', title:'Exit' });
+  close.appendChild(icon('close'));
+  close.addEventListener('click', () => setTool('pointer'));
+  panel.appendChild(close);
+  document.body.appendChild(panel);
+}
+function exitSpawnZoneMode() {
+  spawnZoneMode = false;
+  $('#spawnZonePanel')?.remove();
+}
+function renderSpawnZone() {
+  if (ROLE !== 'gm') return;
+  const tc = $('#tableContent'); if (!tc) return;
+  let z = $('#spawnZone');
+  const zone = (STATE && STATE.boards) ? boardById(STATE.gmViewBoardId).spawnZone : null;
+  if (!zone) { z?.remove(); return; }
+  if (!z) { z = el('div', { id:'spawnZone' }); z.appendChild(el('span', {}, 'Spawn')); tc.appendChild(z); }
+  z.style.left = zone.x + 'px'; z.style.top = zone.y + 'px'; z.style.width = zone.w + 'px'; z.style.height = zone.h + 'px';
 }
 
 // =================== Token Stamper (GM only) ===================
@@ -2893,6 +3015,7 @@ function playerJoinFlow() {
 
 // =================== Boot ===================
 async function boot() {
+  window.addEventListener('beforeunload', () => { if (ROLE === 'gm') autosaveNow(); }); // flush any debounced save
   await openAssetDB();
   // Re-hydrate in-memory ASSETS from IDB cache
   await new Promise(res => {
@@ -3282,6 +3405,10 @@ function setupToolbarUI() {
     stampBtn.appendChild(icon('stamp'));
     stampBtn.appendChild(el('span', {}, 'Stamp'));
     tb.appendChild(stampBtn);
+    const zoneBtn = el('button', { class:'tool-btn', 'data-tool':'spawnzone', title:'Set spawn zone for this board', onclick:() => setTool(spawnZoneMode ? 'pointer' : 'spawnzone') });
+    zoneBtn.appendChild(icon('zone'));
+    zoneBtn.appendChild(el('span', {}, 'Spawn'));
+    tb.appendChild(zoneBtn);
     const mapBtn = el('label', { class:'tool-btn', title:'Upload a battle map' });
     mapBtn.appendChild(icon('map'));
     mapBtn.appendChild(el('span', {}, 'Map'));

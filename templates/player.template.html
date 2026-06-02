@@ -51,7 +51,8 @@ button .icon + span, button span + .icon { margin-left:6px; }
 .grow { flex:1; }
 
 #main { display:flex; height: calc(100vh - 48px); }
-#tableStage { flex:1; position:relative; background: radial-gradient(circle at center, #1c1f22 0%, #0b0d0f 100%); overflow:hidden; }
+#tableStage { flex:1; position:relative; background: radial-gradient(circle at center, #1c1f22 0%, #0b0d0f 100%); overflow:hidden; user-select:none; -webkit-user-select:none; }
+#tableStage input, #tableStage textarea { user-select:text; -webkit-user-select:text; }
 
 .float-panel { position:absolute; z-index:10; transition: transform .25s ease; }
 #deckPanel    { top:64px; left:20px; }
