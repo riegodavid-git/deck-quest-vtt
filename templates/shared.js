@@ -419,6 +419,41 @@ function rollAndLog(spec) {
 const RELAY_URL = 'wss://deck-quest-vtt.onrender.com';
 
 let wsConn = null;
+let _netPingTimer = null;
+let _netPingSent  = 0;
+
+function startNetMonitor() {
+  clearInterval(_netPingTimer);
+  updateNetStatus(true, null);
+  _netPingTimer = setInterval(() => {
+    if (!wsConn || wsConn.readyState !== WebSocket.OPEN) { updateNetStatus(false, null); return; }
+    _netPingSent = Date.now();
+    wsConn.send(JSON.stringify({ type: 'ping', ts: _netPingSent }));
+  }, 5000);
+}
+
+function updateNetStatus(online, ms) {
+  const el = $('#connStatus'); if (!el) return;
+  let dotColor, label, tip;
+  if (!online) {
+    dotColor = '#ef4444'; label = 'Offline';
+    tip = 'Relay: Offline\nPing: —';
+  } else if (ms == null) {
+    dotColor = '#f59e0b'; label = '…';
+    tip = 'Relay: Online\nPing: measuring…';
+  } else if (ms < 100) {
+    dotColor = '#10b981'; label = ms + ' ms';
+    tip = `Relay: Online\nPing: ${ms} ms  ✓ Good`;
+  } else if (ms < 300) {
+    dotColor = '#f59e0b'; label = ms + ' ms';
+    tip = `Relay: Online\nPing: ${ms} ms  ⚠ Fair`;
+  } else {
+    dotColor = '#ef4444'; label = ms + ' ms';
+    tip = `Relay: Online\nPing: ${ms} ms  ✕ High`;
+  }
+  el.innerHTML = `<span class="net-dot" style="background:${dotColor}"></span>${label}`;
+  el.setAttribute('data-tooltip', tip);
+}
 let connections = {};    // GM: { slot: fakeConn }. Player: { gm: fakeConn }
 let cursorThrottle = 0;
 
@@ -442,11 +477,12 @@ function setupPeerGM(roomCode) {
   wsConn = new WebSocket(RELAY_URL);
   wsConn.onopen = () => {
     wsConn.send(JSON.stringify({ type: 'register', room: roomCode, role: 'gm' }));
-    $('#connStatus').textContent = 'Hosting as ' + roomCode;
     $('#roomCode').textContent = roomCode;
+    startNetMonitor();
   };
   wsConn.onmessage = e => {
     let data; try { data = JSON.parse(e.data); } catch { return; }
+    if (data.type === 'pong') { updateNetStatus(true, Date.now() - data.ts); return; }
     // Internal lifecycle: player WebSocket connected/disconnected
     if (data.type === '_ws-connected') {
       const slot = data.slot;
@@ -466,8 +502,8 @@ function setupPeerGM(roomCode) {
       handleFromPlayer(connections[slot], data.msg);
     }
   };
-  wsConn.onclose = () => { $('#connStatus').textContent = 'Relay: disconnected'; };
-  wsConn.onerror = () => { $('#connStatus').textContent = 'Cannot reach relay — check RELAY_URL in build'; };
+  wsConn.onclose = () => { clearInterval(_netPingTimer); updateNetStatus(false, null); };
+  wsConn.onerror = () => { updateNetStatus(false, null); };
 }
 
 function setupPeerPlayer(roomCode) {
@@ -477,13 +513,12 @@ function setupPeerPlayer(roomCode) {
     wsConn.send(JSON.stringify({ type: 'register', room: roomCode, role: 'player', slot: MY_ID }));
     connections.gm = makeConn('gm');
     connections.gm.open = true;
-    $('#connStatus').textContent = 'Connecting to ' + roomCode + '...';
     connections.gm.send({ type: 'join', slot: MY_ID, name: MY_NAME, pfpHash: window._pendingPfpHash || null });
     if (window._pendingPfp) {
       sendAsset(connections.gm, window._pendingPfpHash, window._pendingPfp, 'pfp');
       delete window._pendingPfp;
     }
-    $('#connStatus').textContent = 'Connected to ' + roomCode;
+    startNetMonitor();
   };
   wsConn.onmessage = e => {
     let data; try { data = JSON.parse(e.data); } catch { return; }
@@ -493,7 +528,8 @@ function setupPeerPlayer(roomCode) {
     $('#connStatus').textContent = 'GM offline';
     if (connections.gm) connections.gm.open = false;
   };
-  wsConn.onerror = () => { $('#connStatus').textContent = 'Cannot reach relay — check RELAY_URL in build'; };
+  wsConn.onclose = () => { clearInterval(_netPingTimer); updateNetStatus(false, null); if (connections.gm) connections.gm.open = false; };
+  wsConn.onerror = () => { updateNetStatus(false, null); };
 }
 
 // ---- Chunked asset transfer ----
@@ -607,6 +643,7 @@ function handleFromPlayer(conn, data) {
 }
 
 function handleFromGM(data) {
+  if (data.type === 'pong') { updateNetStatus(true, Date.now() - data.ts); return; }
   if (['asset-begin','asset-chunk','asset-end'].includes(data.type)) return handleAssetMessage(data, connections.gm);
   if (data.type === 'state') {
 

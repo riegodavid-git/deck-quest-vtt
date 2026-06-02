@@ -76,6 +76,12 @@ wss.on('connection', ws => {
       return;
     }
 
+    // ── App-level ping — echo directly back for latency measurement ──────────
+    if (data.type === 'ping') {
+      safeSend(ws, { type: 'pong', ts: data.ts });
+      return;
+    }
+
     if (!ws._room) return;
     const room = rooms[ws._room];
     if (!room) return;
