@@ -283,8 +283,14 @@ function loadCardImage(relativePath, imgEl) {
     loadAssetAsDataUrl(relativePath).then(url => { if (url) imgEl.src = url; });
   } else {
     const hash = PATH_TO_HASH[relativePath];
-    if (hash && ASSETS[hash]) imgEl.src = ASSETS[hash];
-    // If not yet received, rerenderAll() triggered by handleAssetMessage will pick it up later
+    if (hash && ASSETS[hash]) {
+      imgEl.src = ASSETS[hash];
+      imgEl.classList.remove('card-loading');
+    } else {
+      // Shimmer until image arrives; rerenderAll() from handleAssetMessage
+      // will re-call loadCardImage, find the image, and clear the shimmer.
+      imgEl.classList.add('card-loading');
+    }
   }
 }
 

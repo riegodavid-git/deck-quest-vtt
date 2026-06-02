@@ -175,6 +175,8 @@ button .icon + span, button span + .icon { margin-left:6px; }
 .hand-card { width:70px; cursor:pointer; transition:transform .15s; }
 .hand-card:hover { transform: translateY(-4px); }
 .hand-card .card-img { width:100%; display:block; border-radius:3px; box-shadow:0 4px 10px rgba(0,0,0,.6); }
+@keyframes card-shimmer { 0% { background-position:200% 0; } 100% { background-position:-200% 0; } }
+.card-img.card-loading { background:linear-gradient(90deg,var(--panel) 25%,rgba(255,255,255,.07) 50%,var(--panel) 75%) !important; background-size:200% 100% !important; animation:card-shimmer 1.5s infinite linear; min-height:70px; }
 
 /* Combined Log & Chat panel */
 #logChatPanel { position:absolute; bottom:16px; left:50%; transform:translateX(-50%); width:380px; background:var(--glass-bg); backdrop-filter:var(--glass-blur); -webkit-backdrop-filter:var(--glass-blur); border:1px solid var(--line-strong); border-radius:var(--radius-lg); display:flex; flex-direction:column; z-index:100; box-shadow:0 8px 28px rgba(0,0,0,.6); overflow:hidden; transition:transform .25s ease; }
