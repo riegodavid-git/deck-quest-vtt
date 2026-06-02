@@ -124,10 +124,14 @@ kbd { display:inline-block; min-width:16px; text-align:center; padding:2px 6px; 
 .figurine-img { width:100%; height:100%; object-fit:contain; background:transparent; }
 .figurine-loading { width:100%; height:100%; display:flex; align-items:center; justify-content:center; background:var(--panel); color:var(--muted); font:400 11px/1 var(--font-mono); }
 .figurine-label { position:absolute; bottom:-20px; left:0; right:0; text-align:center; font:600 10px/1.4 var(--font-display); background:rgba(0,0,0,.7); padding:2px 5px; border-radius:3px; letter-spacing:.05em; }
-.figurine-resize { position:absolute; right:-6px; bottom:-6px; width:12px; height:12px; background:var(--accent); border:1px solid #1a1612; cursor:nwse-resize; border-radius:2px; opacity:0; transition:opacity .15s; }
+.figurine-resize { position:absolute; width:12px; height:12px; background:var(--accent); border:1px solid #1a1612; border-radius:2px; opacity:0; transition:opacity .15s; z-index:5; }
 .figurine:hover .figurine-resize { opacity:1; }
+.figurine-resize.tl { left:-6px; top:-6px; cursor:nwse-resize; }
+.figurine-resize.br { right:-6px; bottom:-6px; cursor:nwse-resize; }
+.figurine-resize.tr { right:-6px; top:-6px; cursor:nesw-resize; }
+.figurine-resize.bl { left:-6px; bottom:-6px; cursor:nesw-resize; }
 .figurine-lock-icon { display:none; }
-.figurine.locked { border-color: var(--accent-strong); }
+.figurine.locked { }
 .figurine-lock-icon { position:absolute; top:2px; right:2px; font-size:11px; background:rgba(0,0,0,.7); padding:1px 5px; border-radius:3px; pointer-events:none; color:var(--accent); }
 .figurine.character { border:3px solid var(--token-ally); border-radius:50%; overflow:visible; background:transparent; box-shadow: 0 4px 14px rgba(0,0,0,.7); }
 .figurine.character .figurine-img { border-radius:50%; background:#0a0c0e; }
@@ -139,7 +143,7 @@ kbd { display:inline-block; min-width:16px; text-align:center; padding:2px 6px; 
 .effect-badge { background:rgba(0,0,0,.8); border-radius:10px; padding:2px 4px; font-size:12px; line-height:1; border:1px solid var(--line-strong); }
 
 .placed-card { position:absolute; width:140px; cursor:move; }
-.placed-card.locked { cursor:default; outline:2px solid var(--accent-strong); outline-offset:1px; border-radius:5px; }
+.placed-card.locked { cursor:default; border-radius:5px; }
 .placed-card .card-img { width:100%; display:block; border-radius:4px; box-shadow:0 6px 18px rgba(0,0,0,.6); }
 
 .cursor { position:absolute; pointer-events:none; transform:translate(-2px,-2px); }

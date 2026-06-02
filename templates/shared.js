@@ -916,6 +916,7 @@ function applyOp(op, by) {
       if (op.flipH != null) f.flipH = op.flipH;
       if (op.flipV != null) f.flipV = op.flipV;
       if (op.label != null) f.label = op.label;
+      if (op.showName != null) f.showName = op.showName;
       if (op.bringToFront) f.z = nextZ();
       else if (op.sendToBack) {
         const minZ = Math.min(...s.table.figurines.map(g => g.z||1));
@@ -1201,7 +1202,7 @@ function renderFigurines() {
     if (isChar) {
       const tag = el('div', { class:'character-nametag', style:{ background: ringColor } }, charPlayer?.name || f.playerId);
       div.appendChild(tag);
-    } else if (f.label) {
+    } else if (f.showName && f.label) {
       div.appendChild(el('div', { class:'figurine-label' }, f.label));
     }
     // HP / Armor vitals bars — non-character tokens use f.hp / f.armor; character tokens use player sheet
@@ -1243,27 +1244,49 @@ function renderFigurines() {
     if (f.locked) div.appendChild(el('div', { class:'figurine-lock-icon', title:'Locked' }, '🔒'));
     if (!f.locked) {
       makeDraggable(div, (x,y) => sendOp({ type:'move-figurine', instId:f.instId, x, y }), f.instId);
-      // resize handle
-      const handle = el('div', { class:'figurine-resize' });
-      handle.addEventListener('mousedown', e => {
-        e.stopPropagation(); e.preventDefault();
-        const startX = e.clientX, startY = e.clientY, w0 = f.w, h0 = f.h;
-        const size0 = Math.max(w0, h0);
-        const onMove = ev => {
-          const delta = ((ev.clientX - startX) + (ev.clientY - startY)) / 2 / tableZoom;
-          const ns = Math.max(40, size0 + delta);
-          div.style.width = ns+'px'; div.style.height = ns+'px';
-        };
-        const onUp = () => {
-          window.removeEventListener('mousemove', onMove);
-          window.removeEventListener('mouseup', onUp);
-          const ns = parseInt(div.style.width, 10);
-          sendOp({ type:'move-figurine', instId:f.instId, w:ns, h:ns });
-        };
-        window.addEventListener('mousemove', onMove);
-        window.addEventListener('mouseup', onUp);
-      });
-      div.appendChild(handle);
+      // Center-anchored resize handles on all four corners
+      for (const corner of ['tl','tr','bl','br']) {
+        const handle = el('div', { class:'figurine-resize ' + corner });
+        handle.addEventListener('mousedown', e => {
+          e.stopPropagation(); e.preventDefault();
+          const cx = f.x + f.w/2, cy = f.y + f.h/2;       // center stays fixed
+          const tc = $('#tableContent'); const cr = tc.getBoundingClientRect();
+          let ns = Math.max(f.w, f.h);
+          // Group resize: scale every other selected figurine about its own center.
+          const others = (selectionSet.has(f.instId) && selectionSet.size > 1)
+            ? [...selectionSet].filter(id => id !== f.instId)
+                .map(id => s.table.figurines.find(g => g.instId === id))
+                .filter(g => g && !g.locked)
+                .map(g => ({ g, cx: g.x + g.w/2, cy: g.y + g.h/2, w0: g.w }))
+            : [];
+          const onMove = ev => {
+            const mx = (ev.clientX - cr.left)/tableZoom, my = (ev.clientY - cr.top)/tableZoom;
+            ns = Math.max(40, 2 * Math.max(Math.abs(mx - cx), Math.abs(my - cy)));
+            div.style.width = ns+'px'; div.style.height = ns+'px';
+            div.style.left = (cx - ns/2)+'px'; div.style.top = (cy - ns/2)+'px';
+            const factor = ns / Math.max(f.w, f.h);
+            for (const o of others) {
+              const os = Math.max(40, Math.round(o.w0 * factor));
+              const oel = document.querySelector(`[data-inst-id="${o.g.instId}"]`);
+              if (oel) { oel.style.width = os+'px'; oel.style.height = os+'px'; oel.style.left = (o.cx - os/2)+'px'; oel.style.top = (o.cy - os/2)+'px'; }
+            }
+          };
+          const onUp = () => {
+            window.removeEventListener('mousemove', onMove);
+            window.removeEventListener('mouseup', onUp);
+            const sz = Math.round(ns);
+            sendOp({ type:'move-figurine', instId:f.instId, x: Math.round(cx - sz/2), y: Math.round(cy - sz/2), w: sz, h: sz });
+            const factor = ns / Math.max(f.w, f.h);
+            for (const o of others) {
+              const os = Math.max(40, Math.round(o.w0 * factor));
+              sendOp({ type:'move-figurine', instId:o.g.instId, x: Math.round(o.cx - os/2), y: Math.round(o.cy - os/2), w: os, h: os });
+            }
+          };
+          window.addEventListener('mousemove', onMove);
+          window.addEventListener('mouseup', onUp);
+        });
+        div.appendChild(handle);
+      }
     }
     div.addEventListener('contextmenu', e => {
       e.preventDefault();
@@ -1747,6 +1770,7 @@ function showFigurineContextMenu(f, e) {
         const v = prompt('Label (blank to clear):', f.label || '');
         if (v != null) sendOp({ type:'set-figurine-label', instId:f.instId, label: v });
       } },
+    { label: (f.showName ? '✓ ' : '  ') + 'Show name', action: () => sendOp({ type:'move-figurine', instId:f.instId, showName: !f.showName }) },
     { label:'❤ Edit HP / Armor...', action: () => showTokenDetailPopup(f, e) },
     '-',
     // Status effects — toggle each.
