@@ -2248,6 +2248,30 @@ async function openBattlemapBrowser() {
   showCats();
 }
 
+// =================== Background card prefetch ===================
+// Silently loads every card image from disk after session starts.
+// Each load auto-sends to connected players via loadAssetAsDataUrl's pipeline,
+// so future card deals render instantly on player screens.
+async function prefetchCardImages() {
+  if (ROLE !== 'gm' || !assetsRootHandle) return;
+  // Collect unique paths not already cached
+  const seen = new Set();
+  const paths = [];
+  for (const card of CARDS) {
+    for (const p of [card.path, card.backPath]) {
+      if (p && !PATH_CACHE[p] && !seen.has(p)) { seen.add(p); paths.push(p); }
+    }
+  }
+  if (!paths.length) return;
+  // Load in small batches to avoid flooding the relay
+  const BATCH = 4;
+  for (let i = 0; i < paths.length; i += BATCH) {
+    if (!assetsRootHandle) break; // session ended
+    await Promise.all(paths.slice(i, i + BATCH).map(p => loadAssetAsDataUrl(p)));
+    await new Promise(r => setTimeout(r, 120)); // breathing room between batches
+  }
+}
+
 // =================== Setup wizards ===================
 function gmSetupFlow() {
   // restore previous session?
@@ -2255,6 +2279,7 @@ function gmSetupFlow() {
     if (confirm('Restore previous session ' + STATE.roomCode + '?')) {
       setupPeerGM(STATE.roomCode);
       renderAllGM();
+      setTimeout(prefetchCardImages, 1500); // start after initial render settles
       return;
     }
   }
@@ -2263,6 +2288,7 @@ function gmSetupFlow() {
   setupPeerGM(STATE.roomCode);
   renderAllGM();
   autosave();
+  setTimeout(prefetchCardImages, 1500); // start after initial render settles
 }
 
 function updateJoinSlotSelect() {
