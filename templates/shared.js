@@ -145,19 +145,120 @@ function migrateState(state) {
   }
   if (!state.chat) state.chat = [];
   if (state.gmNotes === undefined) state.gmNotes = '';
+  // Multiple boards: wrap a legacy single table into one 'Main' board.
+  if (!state.boards) {
+    const table = state.table || { cards: [], figurines: [], drawings: [] };
+    const b = { id: uid(), name: 'Main', table };
+    state.boards = [b];
+    state.activeBoardId = b.id;
+    state.gmViewBoardId = b.id;
+  }
+  if (!state.activeBoardId) state.activeBoardId = state.boards[0].id;
+  if (!state.gmViewBoardId) state.gmViewBoardId = state.activeBoardId;
+  // Re-point the live table reference at the GM-viewed board.
+  state.table = (state.boards.find(b => b.id === state.gmViewBoardId) || state.boards[0]).table;
 }
+function boardById(id) { return STATE.boards.find(b => b.id === id) || STATE.boards[0]; }
 function normalizeZ(state) {
   // Re-sequence all card/figurine z values to small ints, preserving visual order.
-  // Necessary after loading sessions that used Date.now() z values (which browsers
-  // clamp to int32 max and tie with overlay z-indexes).
   if (!state) return;
-  const items = [
-    ...state.table.cards.map(c => ({ obj: c })),
-    ...state.table.figurines.map(f => ({ obj: f })),
-  ];
-  items.sort((a,b) => (a.obj.z||0) - (b.obj.z||0));
-  _zCounter = 0;
-  for (const { obj } of items) obj.z = ++_zCounter;
+  const boards = state.boards || (state.table ? [{ table: state.table }] : []);
+  for (const b of boards) {
+    const items = [
+      ...b.table.cards.map(c => ({ obj: c })),
+      ...b.table.figurines.map(f => ({ obj: f })),
+    ];
+    items.sort((a,b) => (a.obj.z||0) - (b.obj.z||0));
+    let z = 0;
+    for (const { obj } of items) obj.z = ++z;
+  }
+  _zCounter = boards.reduce((m, b) => Math.max(m, b.table.cards.length + b.table.figurines.length), 0);
+}
+
+// ── Board management (GM only) ───────────────────────────────────────────────
+function gmSwitchView(id) {        // GM previews/edits a board; players unaffected
+  STATE.gmViewBoardId = id;
+  STATE.table = boardById(id).table;
+  selectionSet.clear();
+  renderAllGM();
+  autosave();
+}
+function addBoard() {
+  const b = { id: uid(), name: 'Board ' + (STATE.boards.length + 1), table: { cards: [], figurines: [], drawings: [] } };
+  STATE.boards.push(b);
+  gmSwitchView(b.id);
+}
+function renameBoard(id) {
+  const b = boardById(id); const v = prompt('Board name:', b.name);
+  if (v != null && v.trim()) { b.name = v.trim(); renderBoardBar(); autosave(); }
+}
+function duplicateBoard(id) {
+  const src = boardById(id);
+  const table = JSON.parse(JSON.stringify(src.table));
+  for (const f of table.figurines) f.instId = uid();
+  for (const c of table.cards) c.instId = uid();
+  for (const d of table.drawings) d.id = uid();
+  const b = { id: uid(), name: src.name + ' copy', table };
+  STATE.boards.push(b);
+  gmSwitchView(b.id);
+}
+function deleteBoard(id) {
+  if (STATE.boards.length <= 1) return alert("Can't delete the only board.");
+  if (id === STATE.activeBoardId) return alert("Can't delete the live board — activate a different board first.");
+  if (!confirm('Delete this board?')) return;
+  STATE.boards = STATE.boards.filter(b => b.id !== id);
+  if (STATE.gmViewBoardId === id) gmSwitchView(STATE.boards[0].id);
+  else { renderBoardBar(); autosave(); }
+}
+function activateBoard(id) {        // make a board the live one players see
+  const dest = boardById(id).table;
+  // Player character tokens travel to the newly-activated board (one per player).
+  const chars = {};
+  for (const b of STATE.boards) {
+    b.table.figurines = b.table.figurines.filter(f => {
+      if (f.kind === 'character') { if (!chars[f.playerId]) chars[f.playerId] = f; return false; }
+      return true;
+    });
+  }
+  for (const f of Object.values(chars)) dest.figurines.push(f);
+  STATE.activeBoardId = id;
+  logEntry('GM', 'activated board: ' + boardById(id).name, 'sys');
+  broadcast({ type: 'state' });     // players switch to the new active board
+  renderAllGM();                    // GM view may have changed (char tokens moved)
+  autosave();
+}
+function renderBoardBar() {
+  if (ROLE !== 'gm') return;
+  const bar = $('#boardBar'); if (!bar || !STATE || !STATE.boards) return;
+  bar.innerHTML = '';
+  for (const b of STATE.boards) {
+    const isView = b.id === STATE.gmViewBoardId;
+    const isLive = b.id === STATE.activeBoardId;
+    const chip = el('div', { class:'board-chip' + (isView ? ' viewing' : '') + (isLive ? ' live' : ''), title: isLive ? 'LIVE — players see this board' : 'Click to preview/edit' });
+    chip.appendChild(el('span', { class:'board-name' }, b.name));
+    if (isLive) chip.appendChild(el('span', { class:'board-live-dot', title:'Live' }, '●'));
+    chip.addEventListener('click', () => { if (b.id !== STATE.gmViewBoardId) gmSwitchView(b.id); });
+    chip.addEventListener('contextmenu', e => { e.preventDefault(); showBoardMenu(b, e); });
+    if (isView && !isLive) {
+      const act = el('button', { class:'board-activate', title:'Show this board to players' }, 'Activate');
+      act.addEventListener('click', ev => { ev.stopPropagation(); activateBoard(b.id); });
+      chip.appendChild(act);
+    }
+    bar.appendChild(chip);
+  }
+  const add = el('button', { class:'board-add', title:'New board' }, '+');
+  add.addEventListener('click', addBoard);
+  bar.appendChild(add);
+}
+function showBoardMenu(b, e) {
+  showMenu([
+    { label:'Preview / edit', action: () => gmSwitchView(b.id) },
+    { label:'▶ Activate (show players)', action: () => activateBoard(b.id) },
+    '-',
+    { label:'Rename...', action: () => renameBoard(b.id) },
+    { label:'Duplicate', action: () => duplicateBoard(b.id) },
+    { label:'🗑 Delete', action: () => deleteBoard(b.id) },
+  ], e.clientX, e.clientY);
 }
 function rollDie(n) { return 1 + Math.floor(Math.random() * n); }
 async function hashBlob(dataUrl) {
@@ -359,11 +460,16 @@ function newState(playerCount) {
       color: PLAYER_COLORS[i-1],
     };
   }
+  const mainTable = { cards: [], figurines: [], drawings: [] };
+  const mainBoard = { id: uid(), name: 'Main', table: mainTable };
   return {
     roomCode: randomRoom(),
     playerCount,
     decks, discards,
-    table: { cards: [], figurines: [], drawings: [] },
+    boards: [mainBoard],
+    activeBoardId: mainBoard.id,   // which board players currently see
+    gmViewBoardId: mainBoard.id,   // which board the GM is viewing/editing (not sent to players)
+    table: mainTable,              // live reference to the GM-viewed board's table (keeps all s.table code working)
     hands,
     assetMeta: {},
     log: [],
@@ -379,7 +485,7 @@ function viewFor(playerId) {
     roomCode: s.roomCode, playerCount: s.playerCount,
     decks: Object.fromEntries(Object.entries(s.decks).map(([k,v])=>[k,v.length])),
     discards: s.discards,
-    table: s.table,
+    table: boardById(s.activeBoardId).table,   // players always see the LIVE board, not the GM's previewed one
     hands: {},
     assetMeta: s.assetMeta,
     log: s.log,
@@ -708,7 +814,7 @@ function handleFromPlayer(conn, data) {
     return;
   }
   if (data.type === 'draw-stroke') {
-    STATE.table.drawings.push({ id: uid(), by: conn._playerId, ...data.stroke });
+    boardById(STATE.activeBoardId).table.drawings.push({ id: uid(), by: conn._playerId, ...data.stroke });
     broadcast({ type:'state' }); renderTable(); autosave(); return;
   }
   if (data.type === 'op') return applyOp(data.op, conn._playerId);
@@ -745,12 +851,13 @@ function handleFromGM(data) {
 }
 
 function ensureCharacterToken(playerId) {
-  // GM only: make sure each player has exactly one character token on the table.
+  // GM only: make sure each player has exactly one character token on the LIVE board.
   if (ROLE !== 'gm' || !STATE) return;
-  const existing = STATE.table.figurines.find(f => f.kind === 'character' && f.playerId === playerId);
+  const tbl = boardById(STATE.activeBoardId).table;
+  const existing = tbl.figurines.find(f => f.kind === 'character' && f.playerId === playerId);
   if (existing) return; // already present, render() will pick up current pfp
   const baseX = 400 + (parseInt(playerId.slice(6),10) - 1) * 90;
-  STATE.table.figurines.push({
+  tbl.figurines.push({
     instId: uid(), kind:'character', playerId,
     x: baseX, y: 500, w: 80, h: 80, rot: 0, z: nextZ(),
     opacity: 1, locked: false, flipH:false, flipV:false,
@@ -801,9 +908,18 @@ function sendOp(op) {
 }
 
 // =================== State operations (GM-applied) ===================
+// Ops that mutate the board table — for these, a player-originated op must target
+// the LIVE board (what players see), not the board the GM is currently previewing.
+const TABLE_OPS = new Set(['draw','flip-card','move-table-card','lock-table-card','transfer-card',
+  'add-figurine','move-figurine','remove-figurine','duplicate-figurine','clear-drawings',
+  'clear-my-drawings','undo-drawing','add-drawing','remove-drawing','set-group',
+  'set-figurine-vitals','toggle-effect','set-figurine-label']);
 function applyOp(op, by) {
   if (ROLE !== 'gm') return;
   const s = STATE;
+  const prevTable = s.table;
+  if (by !== 'gm' && s.boards && TABLE_OPS.has(op.type)) s.table = boardById(s.activeBoardId).table;
+  try {
   switch (op.type) {
     case 'draw': {
       const deck = s.decks[op.deck]; if (!deck || !deck.length) return;
@@ -1004,22 +1120,28 @@ function applyOp(op, by) {
       return;
     }
   }
+  } finally {
+    s.table = prevTable;   // restore the GM-viewed board reference before any render
+  }
   broadcast({ type:'state' });
   renderAllGM();
   autosave();
 }
 
 // =================== Save / load / autosave ===================
+// Serialize STATE without the duplicated top-level `table` reference (boards[] is the
+// source of truth; STATE.table is rebuilt from gmViewBoardId on load).
+function snapshotState() { const { table, ...rest } = STATE; return rest; }
 function autosave() {
   if (ROLE !== 'gm') return;
   try {
-    const snap = { state: STATE, assets: ASSETS };
+    const snap = { state: snapshotState(), assets: ASSETS };
     localStorage.setItem('deckquest-session-' + STATE.roomCode, JSON.stringify(snap));
     localStorage.setItem('deckquest-last-room', STATE.roomCode);
   } catch (e) { console.warn('autosave failed (storage full?)', e); }
 }
 function downloadSession() {
-  const snap = { state: STATE, assets: ASSETS };
+  const snap = { state: snapshotState(), assets: ASSETS };
   const blob = new Blob([JSON.stringify(snap)], { type:'application/json' });
   const url = URL.createObjectURL(blob);
   const a = document.createElement('a');
@@ -1063,7 +1185,7 @@ function rerenderAll() {
   });
 }
 function renderAllGM() {
-  renderTopbar(); renderTable(); renderRightRail(); renderLog(); renderChatPanel();
+  renderTopbar(); renderTable(); renderRightRail(); renderLog(); renderChatPanel(); renderBoardBar();
 }
 function renderAllPlayer() {
   renderTopbarPlayer(); renderTable(); renderRightRailPlayer(); renderLog(); renderChatPanel();
