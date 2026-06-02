@@ -2497,7 +2497,10 @@ function setupTableInteraction() {
   if (tableContent) {
     tableContent.addEventListener('mousedown', e => {
       if (e.button !== 0 || spaceHeld || currentTool !== 'pointer') return;
-      if (e.target.closest('.figurine,.placed-card,.deck-stack')) return;
+      // Locked figurines/cards (e.g. a locked map) act as table background — a lasso can
+      // start on top of them. Only an UNLOCKED item (or a deck stack) blocks the lasso.
+      const hit = e.target.closest('.figurine,.placed-card,.deck-stack');
+      if (hit && !hit.classList.contains('locked')) return;
       if (!e.ctrlKey && !e.metaKey) selectionSet.clear();
       const cr = tableContent.getBoundingClientRect();
       const sx = (e.clientX - cr.left) / tableZoom;
@@ -2519,13 +2522,15 @@ function setupTableInteraction() {
         const selW = Math.abs(cx-sx),  selH = Math.abs(cy-sy);
         if (selW < 5 || selH < 5) { rerenderAll(); return; }
         const s = activeState(); if (!s) return;
+        // Locked items act as background — never grabbed by a lasso (so you select the
+        // tokens sitting on a locked map, not the map itself).
         for (const f of s.table.figurines) {
-          if (f.locked && ROLE !== 'gm') continue;
+          if (f.locked) continue;
           if (f.x < selX+selW && f.x+f.w > selX && f.y < selY+selH && f.y+f.h > selY)
             selectionSet.add(f.instId);
         }
         for (const c of s.table.cards) {
-          if (c.locked && ROLE !== 'gm') continue;
+          if (c.locked) continue;
           if (c.x < selX+selW && c.x+140 > selX && c.y < selY+selH && c.y+196 > selY)
             selectionSet.add(c.instId);
         }
