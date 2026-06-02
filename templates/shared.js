@@ -982,13 +982,13 @@ function applyOp(op, by, silent) {
       if (op.where === 'table') c = s.table.cards.find(c => c.instId === op.instId);
       else c = s.hands[op.owner]?.hand.find(c => c.instId === op.instId);
       if (!c) return;
-      if (op.where === 'table' && c.locked && by !== 'gm') return;
+      if (op.where === 'table' && c.locked) return;   // locked table cards can't be flipped (unlock first)
       c.faceUp = !c.faceUp;
       break;
     }
     case 'move-table-card': {
       const c = s.table.cards.find(c => c.instId === op.instId); if (!c) return;
-      if (c.locked && by !== 'gm') return;
+      if (c.locked) return;   // locked cards can't be moved (unlock first)
       c.x = op.x; c.y = op.y; c.z = nextZ();
       if (silent) break;   // batched: mutate only, caller broadcasts/renders once
       // In-place update — no destroy/recreate flash
@@ -1044,13 +1044,13 @@ function applyOp(op, by, silent) {
       break;
     }
     case 'toggle-effect': {
-      const f = s.table.figurines.find(f => f.instId === op.instId); if (!f) return;
+      const f = s.table.figurines.find(f => f.instId === op.instId); if (!f || f.locked) return;
       f.effects = f.effects || {};
       f.effects[op.effect] = !f.effects[op.effect];
       break;
     }
     case 'set-figurine-label': {
-      const f = s.table.figurines.find(f => f.instId === op.instId); if (!f) return;
+      const f = s.table.figurines.find(f => f.instId === op.instId); if (!f || f.locked) return;
       f.label = op.label;
       break;
     }
@@ -1071,6 +1071,8 @@ function applyOp(op, by, silent) {
     }
     case 'move-figurine': {
       const f = s.table.figurines.find(f => f.instId === op.instId); if (!f) return;
+      // Locked figurines accept only the lock toggle — no moving/editing until unlocked.
+      if (f.locked) { if (op.locked != null) f.locked = op.locked; break; }
       if (op.x != null) f.x = op.x; if (op.y != null) f.y = op.y;
       if (op.w != null) f.w = op.w; if (op.h != null) f.h = op.h;
       if (op.rot != null) f.rot = op.rot;
@@ -1149,7 +1151,7 @@ function applyOp(op, by, silent) {
       return;
     }
     case 'set-figurine-vitals': {
-      const f = s.table.figurines.find(x => x.instId === op.instId); if (!f) break;
+      const f = s.table.figurines.find(x => x.instId === op.instId); if (!f || f.locked) break;
       if (op.hp  !== undefined) f.hp   = op.hp;
       if (op.armor !== undefined) f.armor = op.armor;
       break;
@@ -1171,27 +1173,14 @@ function applyOp(op, by, silent) {
   autosave();
 }
 
-// =================== Save / load / autosave ===================
+// =================== Save / load ===================
 // Serialize STATE without the duplicated top-level `table` reference (boards[] is the
 // source of truth; STATE.table is rebuilt from gmViewBoardId on load).
 function snapshotState() { const { table, ...rest } = STATE; return rest; }
-// Immediate write — serializes STATE + ASSETS (can be multi-MB).
-function autosaveNow() {
-  if (ROLE !== 'gm' || !STATE) return;
-  try {
-    const snap = { state: snapshotState(), assets: ASSETS };
-    localStorage.setItem('deckquest-session-' + STATE.roomCode, JSON.stringify(snap));
-    localStorage.setItem('deckquest-last-room', STATE.roomCode);
-  } catch (e) { console.warn('autosave failed (storage full?)', e); }
-}
-// Debounced — coalesce a burst of ops (e.g. a 7-token group edit) into one write,
-// so we don't JSON.stringify all the base64 assets on every single op.
-let _autosaveTimer = null;
-function autosave() {
-  if (ROLE !== 'gm') return;
-  clearTimeout(_autosaveTimer);
-  _autosaveTimer = setTimeout(autosaveNow, 600);
-}
+// Autosave removed by request — the GM saves sessions manually via the Save button.
+// These remain as no-ops so the many call sites keep working.
+function autosave() {}
+function autosaveNow() {}
 function downloadSession() {
   const snap = { state: snapshotState(), assets: ASSETS };
   const blob = new Blob([JSON.stringify(snap)], { type:'application/json' });
@@ -1783,9 +1772,11 @@ function handCardEl(c, owner, editable) {
 function showMenu(items, x, y) {
   $$('.ctx-menu').forEach(m => m.remove());
   const m = el('div', { class:'ctx-menu', style:{ left:x+'px', top:y+'px' }});
+  const onDocDown = ev => { if (!m.contains(ev.target)) removeMenu(); };
+  const removeMenu = () => { m.remove(); document.removeEventListener('mousedown', onDocDown, true); };
   for (const it of items) {
     if (it === '-') { m.appendChild(el('div',{class:'ctx-sep'})); continue; }
-    const item = el('div', { class:'ctx-item' + (it.disabled?' disabled':''), onclick: () => { if (!it.disabled){ it.action(); m.remove(); }} }, it.label);
+    const item = el('div', { class:'ctx-item' + (it.disabled?' disabled':''), onclick: () => { if (!it.disabled){ it.action(); removeMenu(); }} }, it.label);
     m.appendChild(item);
   }
   document.body.appendChild(m);
@@ -1793,7 +1784,9 @@ function showMenu(items, x, y) {
   const r = m.getBoundingClientRect();
   if (r.bottom > window.innerHeight) m.style.top  = Math.max(0, y - r.height) + 'px';
   if (r.right  > window.innerWidth)  m.style.left = Math.max(0, x - r.width)  + 'px';
-  setTimeout(() => document.addEventListener('click', () => m.remove(), { once:true }), 0);
+  // Dismiss on any mousedown outside the menu (capture phase so panel/toolbar
+  // handlers that stopPropagation can't trap the menu open).
+  setTimeout(() => document.addEventListener('mousedown', onDocDown, true), 0);
 }
 function showDrawMenu(deckType, anchor) {
   const r = anchor.getBoundingClientRect();
@@ -2460,7 +2453,7 @@ function setupTableInteraction() {
     // Figurine hover (applies to whole selection if hovered item is part of it)
     if (hoverInfo.kind === 'figurine') {
       const f = s.table.figurines.find(x => x.instId === hoverInfo.instId); if (!f) return;
-      if (f.locked && ROLE !== 'gm') return;
+      if (f.locked) { if (k === 'l' && ROLE === 'gm') sendOp({ type:'move-figurine', instId:f.instId, locked:false }); return; }
       if (k === 'f') figEdit(f, t => ({ flipH: !t.flipH }));
       else if (k === 'r') figEdit(f, t => ({ rot: ((t.rot||0)+90)%360 }));
       else if (k === '[') figEdit(f, () => ({ sendToBack:true }));
@@ -2474,7 +2467,7 @@ function setupTableInteraction() {
     // Table card hover
     if (hoverInfo.kind === 'card') {
       const c = s.table.cards.find(x => x.instId === hoverInfo.instId); if (!c) return;
-      if (c.locked && ROLE !== 'gm') return;
+      if (c.locked) { if (k === 'l' && ROLE === 'gm') sendOp({ type:'lock-table-card', instId:c.instId }); return; }
       if (k === 'f') sendOp({ type:'flip-card', where:'table', instId:c.instId });
       else if (k === 'l' && ROLE === 'gm') sendOp({ type:'lock-table-card', instId:c.instId });
       else if ((k === 'Delete' || k === 'Backspace') && ROLE === 'gm') sendOp({ type:'transfer-card', from:{ where:'table', instId:c.instId }, to:{ where:'discard' } });
@@ -2951,20 +2944,11 @@ async function prefetchCardImages() {
 
 // =================== Setup wizards ===================
 function gmSetupFlow() {
-  // restore previous session?
-  if (tryRestoreLast()) {
-    if (confirm('Restore previous session ' + STATE.roomCode + '?')) {
-      setupPeerGM(STATE.roomCode);
-      renderAllGM();
-      setTimeout(prefetchCardImages, 1500); // start after initial render settles
-      return;
-    }
-  }
+  // No auto-restore — the GM starts fresh and loads a saved session file if they want one.
   const pc = parseInt(prompt('Number of players (1-10)?', '4'), 10);
   STATE = newState(Math.max(1, Math.min(10, pc || 4)));
   setupPeerGM(STATE.roomCode);
   renderAllGM();
-  autosave();
   setTimeout(prefetchCardImages, 1500); // start after initial render settles
 }
 
