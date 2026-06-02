@@ -422,6 +422,45 @@ let wsConn = null;
 let _netPingTimer = null;
 let _netPingSent  = 0;
 
+// Movement sync: GM broadcasts tiny move-patches instead of full state for drags.
+// Players apply them in-place and keep their own in-flight moves "pending" so an
+// unrelated full-state broadcast can't snap a just-moved token back.
+const pendingMoves = {}; // instId -> { x, y, timer }
+
+function broadcastMovePatch(patch) {
+  if (ROLE !== 'gm') return;
+  const msg = { type: 'move-patch', ...patch };
+  for (const conn of Object.values(connections)) conn.send(msg);
+}
+function markOptimisticMove(instId, x, y) {
+  if (ROLE === 'gm' || !LOCAL_VIEW) return;
+  const obj = LOCAL_VIEW.table.figurines.find(f => f.instId === instId)
+           || LOCAL_VIEW.table.cards.find(c => c.instId === instId);
+  if (obj) { obj.x = x; obj.y = y; }
+  if (pendingMoves[instId]?.timer) clearTimeout(pendingMoves[instId].timer);
+  pendingMoves[instId] = { x, y, timer: setTimeout(() => { delete pendingMoves[instId]; }, 3000) };
+}
+function clearPendingMove(instId) {
+  if (pendingMoves[instId]) { clearTimeout(pendingMoves[instId].timer); delete pendingMoves[instId]; }
+}
+function reapplyPendingMoves() {
+  if (!LOCAL_VIEW) return;
+  for (const [instId, pm] of Object.entries(pendingMoves)) {
+    const obj = LOCAL_VIEW.table.figurines.find(f => f.instId === instId)
+             || LOCAL_VIEW.table.cards.find(c => c.instId === instId);
+    if (obj) { obj.x = pm.x; obj.y = pm.y; }
+  }
+}
+function applyMovePatch(p) {
+  if (!LOCAL_VIEW) return;
+  const arr = p.kind === 'card' ? LOCAL_VIEW.table.cards : LOCAL_VIEW.table.figurines;
+  const obj = arr.find(o => o.instId === p.instId);
+  if (obj) { obj.x = p.x; obj.y = p.y; if (p.z != null) obj.z = p.z; }
+  clearPendingMove(p.instId); // GM confirmed this position
+  const dom = document.querySelector(`[data-inst-id="${p.instId}"]`);
+  if (dom) { dom.style.left = p.x + 'px'; dom.style.top = p.y + 'px'; if (p.z != null) dom.style.zIndex = p.z; }
+}
+
 function startNetMonitor() {
   clearInterval(_netPingTimer);
   updateNetStatus(true, null);
@@ -644,11 +683,13 @@ function handleFromPlayer(conn, data) {
 
 function handleFromGM(data) {
   if (data.type === 'pong') { updateNetStatus(true, Date.now() - data.ts); return; }
+  if (data.type === 'move-patch') { applyMovePatch(data); return; }
   if (['asset-begin','asset-chunk','asset-end'].includes(data.type)) return handleAssetMessage(data, connections.gm);
   if (data.type === 'state') {
 
     LOCAL_VIEW = data.view;
     if (data.myId) MY_ID = data.myId;
+    reapplyPendingMoves(); // keep our just-moved tokens put; don't snap back on unrelated broadcasts
     rerenderAll();
     requestMissingAssets(LOCAL_VIEW.assetMeta);
     renderChatPanel();
@@ -764,7 +805,7 @@ function applyOp(op, by) {
       // In-place update — no destroy/recreate flash
       const domCard = document.querySelector(`[data-inst-id="${op.instId}"]`);
       if (domCard) { domCard.style.left = c.x + 'px'; domCard.style.top = c.y + 'px'; domCard.style.zIndex = c.z; }
-      for (const [pid, conn] of Object.entries(connections)) conn.send({ type:'state', view: viewFor(pid), myId: pid });
+      broadcastMovePatch({ kind:'card', instId:op.instId, x:c.x, y:c.y, z:c.z });
       autosave();
       return;
     }
@@ -860,7 +901,7 @@ function applyOp(op, by) {
       if (isDrag) {
         const domFig = document.querySelector(`[data-inst-id="${op.instId}"]`);
         if (domFig) { domFig.style.left = f.x + 'px'; domFig.style.top = f.y + 'px'; }
-        for (const [pid, conn] of Object.entries(connections)) conn.send({ type:'state', view: viewFor(pid), myId: pid });
+        broadcastMovePatch({ kind:'figurine', instId:op.instId, x:f.x, y:f.y, z:f.z });
         autosave();
         return;
       }
@@ -1840,14 +1881,19 @@ function makeDraggable(elm, onEnd, instId) {
       window.removeEventListener('mouseup', onUp);
       _isDragging = false;
       onEnd(lastX, lastY);
+      // Optimistic: apply our own move to LOCAL_VIEW now so an unrelated broadcast
+      // arriving before the GM confirms doesn't snap the token back (players only).
+      if (instId) markOptimisticMove(instId, lastX, lastY);
       // Send ops for group members
       if (groupMembers.length) {
         const dx = lastX - x0, dy = lastY - y0;
         for (const g of groupMembers) {
+          const gx = Math.round(g.x0 + dx), gy = Math.round(g.y0 + dy);
           if (g.kind === 'figurine')
-            sendOp({ type: 'move-figurine', instId: g.instId, x: Math.round(g.x0 + dx), y: Math.round(g.y0 + dy) });
+            sendOp({ type: 'move-figurine', instId: g.instId, x: gx, y: gy });
           else
-            sendOp({ type: 'move-table-card', instId: g.instId, x: Math.round(g.x0 + dx), y: Math.round(g.y0 + dy) });
+            sendOp({ type: 'move-table-card', instId: g.instId, x: gx, y: gy });
+          markOptimisticMove(g.instId, gx, gy);
         }
       }
     };
