@@ -1177,9 +1177,11 @@ function applyOp(op, by, silent) {
 // Serialize STATE without the duplicated top-level `table` reference (boards[] is the
 // source of truth; STATE.table is rebuilt from gmViewBoardId on load).
 function snapshotState() { const { table, ...rest } = STATE; return rest; }
-// Autosave removed by request — the GM saves sessions manually via the Save button.
-// These remain as no-ops so the many call sites keep working.
-function autosave() {}
+// Autosave removed by request — the GM saves manually. We only track unsaved changes
+// so we can warn before the tab closes. Every op already calls autosave(), so that's
+// our "something changed" hook.
+let _dirty = false;
+function autosave() { if (ROLE === 'gm') _dirty = true; }
 function autosaveNow() {}
 function downloadSession() {
   const snap = { state: snapshotState(), assets: ASSETS };
@@ -1188,6 +1190,7 @@ function downloadSession() {
   const a = document.createElement('a');
   a.href = url; a.download = `deckquest-${STATE.roomCode}-${new Date().toISOString().slice(0,10)}.json`;
   a.click(); URL.revokeObjectURL(url);
+  _dirty = false;   // session saved
 }
 function loadSessionFile(file) {
   const r = new FileReader();
@@ -1203,6 +1206,7 @@ function loadSessionFile(file) {
     setupPeerGM(STATE.roomCode);
     renderAllGM();
     logEntry('GM', 'loaded session', 'sys');
+    _dirty = false;   // just loaded — matches the file on disk
   };
   r.readAsText(file);
 }
@@ -3004,7 +3008,10 @@ function playerJoinFlow() {
 
 // =================== Boot ===================
 async function boot() {
-  window.addEventListener('beforeunload', () => { if (ROLE === 'gm') autosaveNow(); }); // flush any debounced save
+  // Warn before leaving if the GM has unsaved changes.
+  window.addEventListener('beforeunload', e => {
+    if (ROLE === 'gm' && _dirty) { e.preventDefault(); e.returnValue = ''; }
+  });
   await openAssetDB();
   // Re-hydrate in-memory ASSETS from IDB cache
   await new Promise(res => {
@@ -3541,11 +3548,11 @@ window.addEventListener('DOMContentLoaded', boot);
 window._saveSession = downloadSession;
 window._loadSession = file => loadSessionFile(file);
 window._newSession = () => {
-  if (!confirm('Start a new session? Current session will be discarded from autosave.')) return;
+  if (_dirty && !confirm('Start a new session? Unsaved changes will be lost.')) return;
   const pc = parseInt(prompt('Number of players (1-10)?', String(STATE.playerCount)), 10);
   STATE = newState(Math.max(1, Math.min(10, pc || 4)));
   if (wsConn) { wsConn.close(); wsConn = null; }
   setupPeerGM(STATE.roomCode);
   renderAllGM();
-  autosave();
+  _dirty = false;   // fresh empty session — nothing worth warning about yet
 };
