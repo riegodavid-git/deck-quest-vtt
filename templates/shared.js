@@ -2021,9 +2021,13 @@ function setupTableInteraction() {
     }
   });
 
-  // Token stamper — capture-phase so a click always stamps (never starts a drag/lasso)
+  // Token stamper — capture-phase so a click always stamps (never starts a drag/lasso).
+  // Only stamp on the actual table surface, never on toolbar / floating panels
+  // (which live inside #tableStage but outside #tableContent).
   stage.addEventListener('mousedown', e => {
     if (!stampMode || e.button !== 0 || spaceHeld) return;
+    const onTable = e.target === stage || (e.target.closest && e.target.closest('#tableContent'));
+    if (!onTable) return;
     e.preventDefault(); e.stopPropagation();
     stampAt(e.clientX, e.clientY);
   }, true);
