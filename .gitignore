@@ -13,3 +13,5 @@ Deck Quest Open Source PNGs/
 Deck Quest Open Source PNGs Organized/
 Website Pegs/
 implementation prompt - file system asset loading.md
+# Local card text/stats — the GM maintains this; the game's card content is not committed
+card-data.json
