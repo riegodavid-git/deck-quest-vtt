@@ -17,43 +17,6 @@ const CARDS_BY_ID = {};
 const CARDS_BY_TYPE = { role:[], skill:[], item:[], location:[], adversary:[], info:[] };
 for (const c of CARDS) { CARDS_BY_ID[c.id] = c; CARDS_BY_TYPE[c.type].push(c); }
 
-// ── Card content data (text/stats), separate from the embedded catalog ──
-// Lives in a local file the GM maintains; merged onto the catalog at boot, editable in-app,
-// and synced to players (tiny vs images). Card content fields:
-const CARD_CONTENT_FIELDS = ['subtitle','tagline','description','ability','sections','stats','effects'];
-const CARD_DATA_KEY = 'deckquest-card-data';
-let CARD_DATA = {};
-function applyCardData(data) {
-  if (!data) return;
-  for (const [id, fields] of Object.entries(data)) {
-    const card = CARDS_BY_ID[id]; if (!card) continue;
-    if (fields.name) card.name = fields.name;
-    for (const f of CARD_CONTENT_FIELDS) if (fields[f] !== undefined) card[f] = fields[f];
-  }
-}
-function effectiveCardData() {   // every card's current content (for syncing the full set)
-  const out = {};
-  for (const c of CARDS) {
-    const has = CARD_CONTENT_FIELDS.some(f => c[f] !== undefined && c[f] !== '' && !(Array.isArray(c[f]) && !c[f].length));
-    if (!has) continue;
-    const o = { name: c.name };
-    for (const f of CARD_CONTENT_FIELDS) if (c[f] !== undefined) o[f] = c[f];
-    out[c.id] = o;
-  }
-  return out;
-}
-function loadCardDataLocal() {
-  try { const raw = localStorage.getItem(CARD_DATA_KEY); if (raw) { CARD_DATA = JSON.parse(raw); applyCardData(CARD_DATA); } } catch {}
-}
-function saveCardDataLocal() {
-  try { localStorage.setItem(CARD_DATA_KEY, JSON.stringify(CARD_DATA)); } catch (e) { console.warn('card-data save failed', e); }
-}
-function broadcastCardData() {   // GM → players: full effective card content
-  if (ROLE !== 'gm') return;
-  const data = effectiveCardData();
-  for (const conn of Object.values(connections)) conn.send({ type:'card-data', data });
-}
-
 // Built-in token lookup — id → token object
 const TOKENS_BY_ID = {};
 // Metadata is tiny now (~30 KB) — populate synchronously at startup
@@ -498,86 +461,6 @@ function loadCardImage(relativePath, imgEl) {
   }
 }
 
-// =================== Data-driven card faces ===================
-// Cards render from JSON data (no images). Per-type accent colour for header/footer/back.
-const CARD_THEME = { role:'#26408b', skill:'#1f7a5a', item:'#111', location:'#8a6d1f', adversary:'#8a1f2b', info:'#444' };
-function renderCardBack(type) {
-  const back = el('div', { class: 'card-back type-' + type });
-  back.appendChild(el('span', {}, (DECK_LABELS[type] || (type ? type[0].toUpperCase()+type.slice(1) : 'Card'))));
-  return back;
-}
-// Flexible section model so each card type's distinct layout can be reproduced:
-//   header (name / subtitle / tagline) → optional description → sections[] → optional stat footer.
-//   section = { title?, band:'desc'|'alt'|'dark', align?, italic?, text?, rows?:[{lead,text,note,star}] }
-function renderCardFace(card, faceUp) {
-  if (!card) return renderCardBack('role');
-  if (!faceUp) return renderCardBack(card.type);
-  const face = el('div', { class: 'card-face type-' + card.type, 'data-card-id': card.id });
-
-  const header = el('div', { class:'cf-header' + ((!card.subtitle && !card.tagline) ? ' cf-header-center' : '') });
-  header.appendChild(el('div', { class:'cf-name' }, card.name || ''));
-  if (card.subtitle) header.appendChild(el('div', { class:'cf-sub' }, card.subtitle));
-  if (card.tagline)  header.appendChild(el('div', { class:'cf-tag' }, card.tagline));
-  face.appendChild(header);
-
-  let any = false;
-  if (card.description) { const d = el('div', { class:'cf-desc' }); d.textContent = card.description; face.appendChild(d); any = true; }
-
-  // Legacy single ability → treat as one 'alt' section.
-  const sections = (card.sections && card.sections.length) ? card.sections
-    : (card.ability && (card.ability.name || card.ability.text)
-        ? [{ title: card.ability.name, band:'alt', align:'center', text: card.ability.text }] : []);
-  for (const sec of sections) {
-    const band = el('div', { class:'cf-band band-' + (sec.band || 'desc') + (sec.align === 'center' ? ' center' : '') + (sec.italic ? ' italic' : '') });
-    if (sec.title) band.appendChild(el('div', { class:'cf-band-title' }, sec.title));
-    if (sec.text) band.appendChild(el('div', { class:'cf-band-text' }, sec.text));
-    for (const row of (sec.rows || [])) {
-      const r = el('div', { class:'cf-row' });
-      if (row.star) r.appendChild(el('span', { class:'cf-row-star' }, '★'));
-      if (row.lead) r.appendChild(el('span', { class:'cf-row-lead' }, row.lead + ' '));
-      if (row.text) r.appendChild(el('span', { class:'cf-row-main' }, row.text));
-      if (row.note) r.appendChild(el('span', { class:'cf-row-note' }, ' (' + row.note + ')'));
-      band.appendChild(r);
-    }
-    face.appendChild(band);
-    any = true;
-  }
-
-  if (card.stats && card.stats.length) {
-    const footer = el('div', { class:'cf-footer' });
-    for (const st of card.stats) {
-      const cell = el('div', { class:'cf-stat' });
-      if (st.label) cell.appendChild(el('div', { class:'cf-stat-label' }, st.label));
-      cell.appendChild(el('div', { class:'cf-stat-val' }, st.value != null ? String(st.value) : ''));
-      footer.appendChild(cell);
-    }
-    face.appendChild(footer);
-    any = true;
-  }
-
-  if (!any) { const d = el('div', { class:'cf-desc' }); d.appendChild(el('span', { class:'cf-empty' }, 'No card text yet.')); face.appendChild(d); }
-  return face;
-}
-
-// Per-type scaffold so the editor opens each card in its correct shape (no content — the GM fills it in).
-function scaffoldForType(type) {
-  switch (type) {
-    case 'role': case 'item':
-      return { description:'', sections:[{ title:'', band:'alt', align:'center', text:'' }],
-        stats:[{label: type==='role'?'Health':'Defense', value:''}, {label: type==='role'?'Role Points':'Item Durability', value:''}] };
-    case 'location':
-      return { description:'', sections:[{ title:'Areas', band:'dark', align:'center', rows:[{text:'', star:false}] }] };
-    case 'adversary':
-      return { description:'', sections:[{ title:'Actions', band:'dark', align:'left', rows:[{lead:'', text:'', note:''}] }],
-        stats:[{label:'Health', value:''}] };
-    case 'skill':
-      return { sections:[{ title:'', band:'desc', align:'center', rows:[{lead:'', text:'', note:''}] }] };
-    case 'info':
-      return { description:'', sections:[{ title:'', band:'desc', align:'left', rows:[{lead:'1.', text:''}] }] };
-    default: return { description:'', sections:[] };
-  }
-}
-
 // =================== State ===================
 let STATE = null;       // GM only: canonical
 let LOCAL_VIEW = null;  // Player: filtered state received from GM
@@ -947,7 +830,6 @@ function handleFromPlayer(conn, data) {
     if (STATE.hands[slot].pfpHash) ensureCharacterToken(slot);
     // send the new player their initial filtered view + ID
     conn.send({ type:'state', view: viewFor(slot), myId: slot, takenSlots: Object.keys(connections).filter(s => connections[s]?.open) });
-    conn.send({ type:'card-data', data: effectiveCardData() });   // card text/stats (tiny, no images)
     broadcastTakenSlots();
     return;
   }
@@ -974,7 +856,6 @@ function handleFromPlayer(conn, data) {
 function handleFromGM(data) {
   if (data.type === 'pong') { updateNetStatus(true, Date.now() - data.ts); return; }
   if (data.type === 'move-patch') { applyMovePatch(data); return; }
-  if (data.type === 'card-data') { applyCardData(data.data); rerenderAll(); return; }
   if (['asset-begin','asset-chunk','asset-end'].includes(data.type)) return handleAssetMessage(data, connections.gm);
   if (data.type === 'state') {
 
@@ -1391,7 +1272,10 @@ function renderDeckStacks() {
     const stack = el('div', { class:'deck-stack', title: `${DECK_LABELS[t]} (${count})`, 'data-deck': t });
     const backCard = CARDS_BY_TYPE[t][0];
     if (count > 0 && backCard) {
-      stack.appendChild(renderCardBack(t));
+      const bimg = el('img', { class:'card-img', draggable:'false' });
+      bimg.style.background = 'var(--panel)';
+      loadCardImage(backCard.backPath, bimg);
+      stack.appendChild(bimg);
     } else {
       stack.appendChild(el('div', { class:'card-empty' }, 'Empty'));
     }
@@ -1408,7 +1292,12 @@ function renderDeckStacks() {
     for (const t of DECK_TYPES) {
       const arr = s.discards[t]; const top = arr[arr.length-1];
       const stack = el('div', { class:'deck-stack discard', 'data-deck': t });
-      if (top) stack.appendChild(renderCardFace(CARDS_BY_ID[top], true));
+      if (top) {
+        const dimg = el('img', { class:'card-img' });
+        dimg.style.background = 'var(--panel)';
+        loadCardImage(CARDS_BY_ID[top].path, dimg);
+        stack.appendChild(dimg);
+      }
       else stack.appendChild(el('div', { class:'card-empty' }, 'Discard'));
       stack.appendChild(el('div', { class:'deck-label' }, `${DECK_LABELS[t]} discard · ${arr.length}`));
       stack.style.cursor = 'pointer';
@@ -1426,7 +1315,10 @@ function renderTableCards() {
   for (const c of s.table.cards) {
     const card = CARDS_BY_ID[c.cardId];
     const div = el('div', { class:'placed-card' + (c.locked?' locked':'') + (selectionSet.has(c.instId)?' selected':'') + (c.groupId?' grouped':''), style:{ left:c.x+'px', top:c.y+'px', transform:`rotate(${c.rot||0}deg)`, zIndex:c.z||1 }, 'data-inst-id': c.instId });
-    div.appendChild(renderCardFace(card, c.faceUp));
+    const cimg = el('img', { class:'card-img', draggable:'false' });
+    cimg.style.background = 'var(--panel)';
+    loadCardImage(c.faceUp ? card.path : card.backPath, cimg);
+    div.appendChild(cimg);
     if (c.locked) div.appendChild(el('div', { class:'figurine-lock-icon', title:'Locked by GM' }, '🔒'));
     if (!c.locked) {
       makeDraggable(div, (x,y) => sendOp({ type:'move-table-card', instId:c.instId, x, y }), c.instId);
@@ -1865,7 +1757,11 @@ function handCardEl(c, owner, editable) {
   // every player. Show the face whenever we have the cardId.
   const showFace = !!card;
   const div = el('div', { class:'hand-card', title: showFace ? card.name : '' });
-  div.appendChild(renderCardFace(card, showFace));
+  const himg = el('img', { class:'card-img' });
+  himg.style.background = 'var(--panel)';
+  const hPath = showFace ? card?.path : (card?.backPath || CARDS_BY_TYPE.role[0]?.backPath);
+  loadCardImage(hPath, himg);
+  div.appendChild(himg);
   if (editable !== false && (ROLE === 'gm' || owner === MY_ID)) {
     div.addEventListener('click', () => sendOp({ type:'flip-card', where:'hand', owner, instId:c.instId }));
     div.addEventListener('contextmenu', e => {
@@ -2318,8 +2214,10 @@ function openSearch(filterType) {
     list = list.slice(0, 50);
     for (const c of list) {
       const r = el('div', { class:'search-result' });
-      const cardEl = renderCardFace(c, true); cardEl.classList.add('search-card');
-      r.appendChild(cardEl);
+      const simg = el('img');
+      simg.style.background = 'var(--panel)';
+      loadCardImage(c.path, simg);
+      r.appendChild(simg);
       r.appendChild(el('div', {}, c.name + ' (' + c.type + ')'));
       const actions = el('div', { class:'sr-actions' });
       actions.appendChild(el('button', { onclick: () => { spawnSpecificCard(c.id, 'table'); overlay.remove(); } }, 'To table'));
@@ -2337,178 +2235,6 @@ function openSearch(filterType) {
   document.body.appendChild(overlay);
   input.focus(); update();
 }
-// =================== Card editor (GM) ===================
-function openCardEditor() {
-  if ($('#cardEditor')) return;
-  const overlay = el('div', { class:'token-panel', id:'cardEditor' });
-  overlay.addEventListener('click', e => { if (e.target === overlay) overlay.remove(); });
-  const box = el('div', { class:'token-box', style:{ width:'980px' } });
-  const hdr = el('div', { class:'token-header' });
-  hdr.appendChild(el('span', {}, 'Card Editor'));
-  const searchI = el('input', { type:'text', placeholder:'Search cards…', class:'token-search' });
-  hdr.appendChild(searchI);
-  const exportBtn = el('button', { class:'mini' }, 'Export JSON');
-  const importLbl = el('label', { class:'mini', style:{ cursor:'pointer' } }, 'Import');
-  const importI = el('input', { type:'file', accept:'application/json', style:{ display:'none' } });
-  importLbl.appendChild(importI);
-  hdr.appendChild(exportBtn); hdr.appendChild(importLbl);
-  hdr.appendChild(el('button', { class:'mini', onclick:() => overlay.remove() }, '×'));
-  box.appendChild(hdr);
-
-  const body = el('div', { class:'ce-body' });
-  const listEl = el('div', { class:'ce-list' });
-  const formWrap = el('div', { class:'ce-form-wrap' });
-  body.appendChild(listEl); body.appendChild(formWrap);
-  box.appendChild(body);
-  overlay.appendChild(box); document.body.appendChild(overlay);
-
-  let selectedId = null, previewEl = null;
-
-  function persist(card) {
-    CARD_DATA[card.id] = { name: card.name };
-    for (const f of CARD_CONTENT_FIELDS) if (card[f] !== undefined) CARD_DATA[card.id][f] = card[f];
-    saveCardDataLocal(); broadcastCardData();
-    if (previewEl) { previewEl.innerHTML = ''; previewEl.appendChild(renderCardFace(card, true)); }
-    rerenderAll();
-  }
-  function isFilled(c) { return CARD_CONTENT_FIELDS.some(f => c[f] && (!Array.isArray(c[f]) || c[f].length) && (typeof c[f] !== 'object' || Array.isArray(c[f]) || c[f].name || c[f].text)); }
-
-  function renderList() {
-    const q = searchI.value.toLowerCase();
-    listEl.innerHTML = '';
-    for (const c of CARDS) {
-      if (q && !c.name.toLowerCase().includes(q) && !c.type.includes(q)) continue;
-      const row = el('div', { class:'ce-list-item' + (c.id === selectedId ? ' active' : '') });
-      row.appendChild(el('span', { class:'ce-badge ce-' + c.type }, c.type[0].toUpperCase()));
-      row.appendChild(el('span', { class:'ce-list-name' }, c.name));
-      if (isFilled(c)) row.appendChild(el('span', { class:'ce-filled', title:'Has content' }, '●'));
-      row.addEventListener('click', () => { selectedId = c.id; renderList(); renderForm(c); });
-      listEl.appendChild(row);
-    }
-  }
-  function field(label, value, oninput, multiline) {
-    const w = el('div', { class:'ce-field' });
-    w.appendChild(el('label', {}, label));
-    const inp = multiline ? el('textarea', { rows:'3' }) : el('input', { type:'text' });
-    inp.value = value || '';
-    inp.addEventListener('input', () => oninput(inp.value));
-    w.appendChild(inp); return w;
-  }
-  function renderForm(card) {
-    // First open of an empty card → scaffold the shape for its type (no content).
-    if (!card.sections && !card.description && !card.stats && !(card.ability && (card.ability.name||card.ability.text))) {
-      Object.assign(card, scaffoldForType(card.type));
-    }
-    card.sections = card.sections || [];
-    formWrap.innerHTML = '';
-    const form = el('div', { class:'ce-form' });
-    form.appendChild(field('Name', card.name, v => { card.name = v; persist(card); }));
-    form.appendChild(field('Subtitle (class / item type / "Information")', card.subtitle, v => { card.subtitle = v; persist(card); }));
-    form.appendChild(field('Tagline', card.tagline, v => { card.tagline = v; persist(card); }));
-    form.appendChild(field('Description (top paragraph)', card.description, v => { card.description = v; persist(card); }, true));
-
-    // ── Sections (bands) ──
-    const secsWrap = el('div', { class:'ce-stats' });
-    secsWrap.appendChild(el('label', {}, 'Sections (bands)'));
-    const secsBox = el('div');
-    function renderSections() {
-      secsBox.innerHTML = '';
-      card.sections.forEach((sec, si) => {
-        sec.rows = sec.rows || [];
-        const secEl = el('div', { class:'ce-section' });
-        const top = el('div', { class:'ce-sec-top' });
-        const titleI = el('input', { type:'text', placeholder:'Section title (optional)', value: sec.title || '' });
-        titleI.addEventListener('input', () => { sec.title = titleI.value; persist(card); });
-        const bandSel = el('select');
-        for (const [v,l] of [['desc','White'],['alt','Gray'],['dark','Colour']]) bandSel.appendChild(el('option', { value:v, selected: (sec.band||'desc')===v }, l));
-        bandSel.addEventListener('change', () => { sec.band = bandSel.value; persist(card); });
-        const alignBtn = el('button', { class:'mini', title:'Toggle centre' }, sec.align==='center'?'⊟ center':'⊢ left');
-        alignBtn.addEventListener('click', () => { sec.align = sec.align==='center'?'left':'center'; renderSections(); persist(card); });
-        const delSec = el('button', { class:'mini', onclick:() => { card.sections.splice(si,1); renderSections(); persist(card); } }, '🗑');
-        top.appendChild(titleI); top.appendChild(bandSel); top.appendChild(alignBtn); top.appendChild(delSec);
-        secEl.appendChild(top);
-        // a free paragraph for this section
-        const textA = el('textarea', { rows:'2', placeholder:'Paragraph text (optional)' }); textA.value = sec.text || '';
-        textA.addEventListener('input', () => { sec.text = textA.value; persist(card); });
-        secEl.appendChild(textA);
-        // rows (range / name / note / star)
-        const rowsHost = el('div');
-        function renderRows() {
-          rowsHost.innerHTML = '';
-          sec.rows.forEach((row, ri) => {
-            const rEl = el('div', { class:'ce-row' });
-            const lead = el('input', { type:'text', placeholder:'Lead', value: row.lead || '' });
-            const txt  = el('input', { type:'text', placeholder:'Text', value: row.text || '' });
-            const note = el('input', { type:'text', placeholder:'Note', value: row.note || '' });
-            lead.addEventListener('input', () => { row.lead = lead.value; persist(card); });
-            txt.addEventListener('input',  () => { row.text = txt.value;  persist(card); });
-            note.addEventListener('input', () => { row.note = note.value; persist(card); });
-            const star = el('button', { class:'mini', title:'Toggle star' }, row.star?'★':'☆');
-            star.addEventListener('click', () => { row.star = !row.star; renderRows(); persist(card); });
-            const delR = el('button', { class:'mini', onclick:() => { sec.rows.splice(ri,1); renderRows(); persist(card); } }, '×');
-            rEl.appendChild(lead); rEl.appendChild(txt); rEl.appendChild(note); rEl.appendChild(star); rEl.appendChild(delR);
-            rowsHost.appendChild(rEl);
-          });
-        }
-        renderRows();
-        secEl.appendChild(rowsHost);
-        secEl.appendChild(el('button', { class:'mini', onclick:() => { sec.rows.push({ lead:'', text:'', note:'' }); renderRows(); persist(card); } }, '+ row'));
-        secsBox.appendChild(secEl);
-      });
-    }
-    renderSections();
-    secsWrap.appendChild(secsBox);
-    secsWrap.appendChild(el('button', { class:'mini', onclick:() => { card.sections.push({ title:'', band:'desc', align:'left', rows:[] }); renderSections(); persist(card); } }, '+ section'));
-    form.appendChild(secsWrap);
-
-    // ── Footer stats ──
-    const statsWrap = el('div', { class:'ce-stats' });
-    statsWrap.appendChild(el('label', {}, 'Footer stats'));
-    card.stats = card.stats || [];
-    const rowsBox = el('div');
-    function renderStats() {
-      rowsBox.innerHTML = '';
-      card.stats.forEach((st, i) => {
-        const row = el('div', { class:'ce-stat-row' });
-        const lab = el('input', { type:'text', placeholder:'Label', value: st.label || '' });
-        const val = el('input', { type:'text', placeholder:'Value', value: st.value != null ? st.value : '' });
-        lab.addEventListener('input', () => { st.label = lab.value; persist(card); });
-        val.addEventListener('input', () => { st.value = val.value; persist(card); });
-        const del = el('button', { class:'mini', onclick:() => { card.stats.splice(i,1); persist(card); renderStats(); } }, '×');
-        row.appendChild(lab); row.appendChild(val); row.appendChild(del);
-        rowsBox.appendChild(row);
-      });
-    }
-    renderStats();
-    statsWrap.appendChild(rowsBox);
-    statsWrap.appendChild(el('button', { class:'mini', onclick:() => { card.stats.push({ label:'', value:'' }); persist(card); renderStats(); } }, '+ stat'));
-    form.appendChild(statsWrap);
-
-    formWrap.appendChild(form);
-    previewEl = el('div', { class:'ce-preview' });
-    previewEl.appendChild(renderCardFace(card, true));
-    formWrap.appendChild(previewEl);
-  }
-
-  exportBtn.addEventListener('click', () => {
-    const blob = new Blob([JSON.stringify(effectiveCardData(), null, 2)], { type:'application/json' });
-    const url = URL.createObjectURL(blob); const a = document.createElement('a');
-    a.href = url; a.download = 'card-data.json'; a.click(); URL.revokeObjectURL(url);
-  });
-  importI.addEventListener('change', () => {
-    const f = importI.files[0]; if (!f) return;
-    const r = new FileReader();
-    r.onload = () => {
-      try { const d = JSON.parse(r.result); CARD_DATA = d; applyCardData(d); saveCardDataLocal(); broadcastCardData();
-        renderList(); if (selectedId) renderForm(CARDS_BY_ID[selectedId]); rerenderAll(); }
-      catch (e) { alert('Could not import: ' + e.message); }
-    };
-    r.readAsText(f);
-  });
-  searchI.addEventListener('input', renderList);
-  renderList();
-}
-
 function spawnSpecificCard(cardId, target) {
   // Remove from deck if present, then add to target as an instance
   const t = CARDS_BY_ID[cardId].type;
@@ -3286,7 +3012,6 @@ async function boot() {
   window.addEventListener('beforeunload', e => {
     if (ROLE === 'gm' && _dirty) { e.preventDefault(); e.returnValue = ''; }
   });
-  if (ROLE === 'gm') loadCardDataLocal();   // overlay the GM's saved card content onto the catalog
   await openAssetDB();
   // Re-hydrate in-memory ASSETS from IDB cache
   await new Promise(res => {
@@ -3344,9 +3069,10 @@ function setupKeybindHelp() {
 }
 
 let altDown = false;
-let hoverCardId = null;
+let hoverImg = null;
 function setupAltPreview() {
   const preview = el('div', { id:'altPreview' });
+  preview.appendChild(el('img', {}));
   document.body.appendChild(preview);
   window.addEventListener('keydown', e => {
     if (e.key === 'Alt') { altDown = true; updatePreview(); e.preventDefault(); }
@@ -3356,14 +3082,17 @@ function setupAltPreview() {
   });
   window.addEventListener('blur', () => { altDown = false; preview.style.display = 'none'; });
   document.addEventListener('mousemove', e => {
-    const cf = e.target && e.target.closest ? e.target.closest('.card-face[data-card-id]') : null;
-    hoverCardId = cf ? cf.getAttribute('data-card-id') : null;
+    const t = e.target;
+    if (t && t.classList && t.classList.contains('card-img')) {
+      hoverImg = t.src;
+    } else {
+      hoverImg = null;
+    }
     updatePreview();
   });
   function updatePreview() {
-    if (altDown && hoverCardId && CARDS_BY_ID[hoverCardId]) {
-      preview.innerHTML = '';
-      preview.appendChild(renderCardFace(CARDS_BY_ID[hoverCardId], true));
+    if (altDown && hoverImg) {
+      preview.querySelector('img').src = hoverImg;
       preview.style.display = 'block';
     } else {
       preview.style.display = 'none';
@@ -3438,7 +3167,10 @@ function showDiscardPanel(deckType) {
   ids.forEach((cardId, idx) => {
     const card = CARDS_BY_ID[cardId]; if (!card) return;
     const item = el('div', { class:'discard-item' });
-    item.appendChild(renderCardFace(card, true));
+    const dimg = el('img', { class:'card-img', title: card.name });
+    dimg.style.background = 'var(--panel)';
+    loadCardImage(card.path, dimg);
+    item.appendChild(dimg);
     item.appendChild(el('div', { class:'discard-name' }, card.name));
     if (ROLE === 'gm') {
       const actions = el('div', { class:'discard-actions' });
@@ -3683,10 +3415,6 @@ function setupToolbarUI() {
     searchBtn.appendChild(icon('search'));
     searchBtn.appendChild(el('span', {}, 'Search'));
     tb.appendChild(searchBtn);
-    const cardsBtn = el('button', { class:'tool-btn', title:'Edit card text & stats', onclick: () => openCardEditor() });
-    cardsBtn.appendChild(icon('deck'));
-    cardsBtn.appendChild(el('span', {}, 'Cards'));
-    tb.appendChild(cardsBtn);
   }
 }
 

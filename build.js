@@ -85,7 +85,7 @@ function scanTokens() {
 
 // ── Main ──────────────────────────────────────────────────────────────────────
 function main() {
-  // Cards — catalog (id/name/type) from the folder names; cards render from DATA, not images.
+  // Cards
   const cards = [];
   for (const { type, dir } of CARD_FOLDERS) {
     const full = path.join(PNG_ROOT, dir);
@@ -94,21 +94,14 @@ function main() {
     console.log(`${type}: ${files.length} cards`);
     for (const f of files) {
       const name = f.replace(/-01\.png$/i, '').replace(/\.png$/i, '');
-      cards.push({ id: type + '-' + slugify(name), name, type });
+      cards.push({
+        id: type + '-' + slugify(name),
+        name,
+        type,
+        path: dir + '/' + f,
+        backPath: BACKS[type],
+      });
     }
-  }
-  // Merge the GM's local, git-ignored card-data.json (filled rules text / stats) over the catalog.
-  const cardDataPath = path.join(ROOT, 'card-data.json');
-  if (fs.existsSync(cardDataPath)) {
-    try {
-      const data = JSON.parse(fs.readFileSync(cardDataPath, 'utf8'));
-      const byId = Array.isArray(data) ? Object.fromEntries(data.map(d => [d.id, d])) : data;
-      let filled = 0;
-      for (const c of cards) { if (byId[c.id]) { Object.assign(c, byId[c.id], { id:c.id, name:c.name, type:c.type }); filled++; } }
-      console.log(`Merged card-data.json: ${filled} cards filled`);
-    } catch (e) { console.warn('card-data.json parse failed:', e.message); }
-  } else {
-    console.log('No card-data.json (cards render as name/type placeholders — fill via the in-app editor).');
   }
   console.log(`Total: ${cards.length} cards`);
 
