@@ -20,7 +20,7 @@ for (const c of CARDS) { CARDS_BY_ID[c.id] = c; CARDS_BY_TYPE[c.type].push(c); }
 // ── Card content data (text/stats), separate from the embedded catalog ──
 // Lives in a local file the GM maintains; merged onto the catalog at boot, editable in-app,
 // and synced to players (tiny vs images). Card content fields:
-const CARD_CONTENT_FIELDS = ['subtitle','tagline','description','ability','stats','effects'];
+const CARD_CONTENT_FIELDS = ['subtitle','tagline','description','ability','sections','stats','effects'];
 const CARD_DATA_KEY = 'deckquest-card-data';
 let CARD_DATA = {};
 function applyCardData(data) {
@@ -506,25 +506,43 @@ function renderCardBack(type) {
   back.appendChild(el('span', {}, (DECK_LABELS[type] || (type ? type[0].toUpperCase()+type.slice(1) : 'Card'))));
   return back;
 }
+// Flexible section model so each card type's distinct layout can be reproduced:
+//   header (name / subtitle / tagline) → optional description → sections[] → optional stat footer.
+//   section = { title?, band:'desc'|'alt'|'dark', align?, italic?, text?, rows?:[{lead,text,note,star}] }
 function renderCardFace(card, faceUp) {
   if (!card) return renderCardBack('role');
   if (!faceUp) return renderCardBack(card.type);
   const face = el('div', { class: 'card-face type-' + card.type, 'data-card-id': card.id });
-  const header = el('div', { class:'cf-header' });
+
+  const header = el('div', { class:'cf-header' + ((!card.subtitle && !card.tagline) ? ' cf-header-center' : '') });
   header.appendChild(el('div', { class:'cf-name' }, card.name || ''));
   if (card.subtitle) header.appendChild(el('div', { class:'cf-sub' }, card.subtitle));
   if (card.tagline)  header.appendChild(el('div', { class:'cf-tag' }, card.tagline));
   face.appendChild(header);
-  const desc = el('div', { class:'cf-desc' });
-  if (card.description) desc.textContent = card.description;
-  else desc.appendChild(el('span', { class:'cf-empty' }, 'No card text yet.'));
-  face.appendChild(desc);
-  if (card.ability && (card.ability.name || card.ability.text)) {
-    const ab = el('div', { class:'cf-ability' });
-    if (card.ability.name) ab.appendChild(el('div', { class:'cf-ab-name' }, card.ability.name));
-    if (card.ability.text) ab.appendChild(el('div', { class:'cf-ab-text' }, card.ability.text));
-    face.appendChild(ab);
+
+  let any = false;
+  if (card.description) { const d = el('div', { class:'cf-desc' }); d.textContent = card.description; face.appendChild(d); any = true; }
+
+  // Legacy single ability → treat as one 'alt' section.
+  const sections = (card.sections && card.sections.length) ? card.sections
+    : (card.ability && (card.ability.name || card.ability.text)
+        ? [{ title: card.ability.name, band:'alt', align:'center', text: card.ability.text }] : []);
+  for (const sec of sections) {
+    const band = el('div', { class:'cf-band band-' + (sec.band || 'desc') + (sec.align === 'center' ? ' center' : '') + (sec.italic ? ' italic' : '') });
+    if (sec.title) band.appendChild(el('div', { class:'cf-band-title' }, sec.title));
+    if (sec.text) band.appendChild(el('div', { class:'cf-band-text' }, sec.text));
+    for (const row of (sec.rows || [])) {
+      const r = el('div', { class:'cf-row' });
+      if (row.star) r.appendChild(el('span', { class:'cf-row-star' }, '★'));
+      if (row.lead) r.appendChild(el('span', { class:'cf-row-lead' }, row.lead + ' '));
+      if (row.text) r.appendChild(el('span', { class:'cf-row-main' }, row.text));
+      if (row.note) r.appendChild(el('span', { class:'cf-row-note' }, ' (' + row.note + ')'));
+      band.appendChild(r);
+    }
+    face.appendChild(band);
+    any = true;
   }
+
   if (card.stats && card.stats.length) {
     const footer = el('div', { class:'cf-footer' });
     for (const st of card.stats) {
@@ -534,8 +552,30 @@ function renderCardFace(card, faceUp) {
       footer.appendChild(cell);
     }
     face.appendChild(footer);
+    any = true;
   }
+
+  if (!any) { const d = el('div', { class:'cf-desc' }); d.appendChild(el('span', { class:'cf-empty' }, 'No card text yet.')); face.appendChild(d); }
   return face;
+}
+
+// Per-type scaffold so the editor opens each card in its correct shape (no content — the GM fills it in).
+function scaffoldForType(type) {
+  switch (type) {
+    case 'role': case 'item':
+      return { description:'', sections:[{ title:'', band:'alt', align:'center', text:'' }],
+        stats:[{label: type==='role'?'Health':'Defense', value:''}, {label: type==='role'?'Role Points':'Item Durability', value:''}] };
+    case 'location':
+      return { description:'', sections:[{ title:'Areas', band:'dark', align:'center', rows:[{text:'', star:false}] }] };
+    case 'adversary':
+      return { description:'', sections:[{ title:'Actions', band:'dark', align:'left', rows:[{lead:'', text:'', note:''}] }],
+        stats:[{label:'Health', value:''}] };
+    case 'skill':
+      return { sections:[{ title:'', band:'desc', align:'center', rows:[{lead:'', text:'', note:''}] }] };
+    case 'info':
+      return { description:'', sections:[{ title:'', band:'desc', align:'left', rows:[{lead:'1.', text:''}] }] };
+    default: return { description:'', sections:[] };
+  }
 }
 
 // =================== State ===================
@@ -2355,15 +2395,73 @@ function openCardEditor() {
     w.appendChild(inp); return w;
   }
   function renderForm(card) {
+    // First open of an empty card → scaffold the shape for its type (no content).
+    if (!card.sections && !card.description && !card.stats && !(card.ability && (card.ability.name||card.ability.text))) {
+      Object.assign(card, scaffoldForType(card.type));
+    }
+    card.sections = card.sections || [];
     formWrap.innerHTML = '';
     const form = el('div', { class:'ce-form' });
     form.appendChild(field('Name', card.name, v => { card.name = v; persist(card); }));
-    form.appendChild(field('Subtitle (e.g. class / item type)', card.subtitle, v => { card.subtitle = v; persist(card); }));
+    form.appendChild(field('Subtitle (class / item type / "Information")', card.subtitle, v => { card.subtitle = v; persist(card); }));
     form.appendChild(field('Tagline', card.tagline, v => { card.tagline = v; persist(card); }));
-    form.appendChild(field('Description', card.description, v => { card.description = v; persist(card); }, true));
-    card.ability = card.ability || { name:'', text:'' };
-    form.appendChild(field('Ability name', card.ability.name, v => { card.ability.name = v; persist(card); }));
-    form.appendChild(field('Ability text', card.ability.text, v => { card.ability.text = v; persist(card); }, true));
+    form.appendChild(field('Description (top paragraph)', card.description, v => { card.description = v; persist(card); }, true));
+
+    // ── Sections (bands) ──
+    const secsWrap = el('div', { class:'ce-stats' });
+    secsWrap.appendChild(el('label', {}, 'Sections (bands)'));
+    const secsBox = el('div');
+    function renderSections() {
+      secsBox.innerHTML = '';
+      card.sections.forEach((sec, si) => {
+        sec.rows = sec.rows || [];
+        const secEl = el('div', { class:'ce-section' });
+        const top = el('div', { class:'ce-sec-top' });
+        const titleI = el('input', { type:'text', placeholder:'Section title (optional)', value: sec.title || '' });
+        titleI.addEventListener('input', () => { sec.title = titleI.value; persist(card); });
+        const bandSel = el('select');
+        for (const [v,l] of [['desc','White'],['alt','Gray'],['dark','Colour']]) bandSel.appendChild(el('option', { value:v, selected: (sec.band||'desc')===v }, l));
+        bandSel.addEventListener('change', () => { sec.band = bandSel.value; persist(card); });
+        const alignBtn = el('button', { class:'mini', title:'Toggle centre' }, sec.align==='center'?'⊟ center':'⊢ left');
+        alignBtn.addEventListener('click', () => { sec.align = sec.align==='center'?'left':'center'; renderSections(); persist(card); });
+        const delSec = el('button', { class:'mini', onclick:() => { card.sections.splice(si,1); renderSections(); persist(card); } }, '🗑');
+        top.appendChild(titleI); top.appendChild(bandSel); top.appendChild(alignBtn); top.appendChild(delSec);
+        secEl.appendChild(top);
+        // a free paragraph for this section
+        const textA = el('textarea', { rows:'2', placeholder:'Paragraph text (optional)' }); textA.value = sec.text || '';
+        textA.addEventListener('input', () => { sec.text = textA.value; persist(card); });
+        secEl.appendChild(textA);
+        // rows (range / name / note / star)
+        const rowsHost = el('div');
+        function renderRows() {
+          rowsHost.innerHTML = '';
+          sec.rows.forEach((row, ri) => {
+            const rEl = el('div', { class:'ce-row' });
+            const lead = el('input', { type:'text', placeholder:'Lead', value: row.lead || '' });
+            const txt  = el('input', { type:'text', placeholder:'Text', value: row.text || '' });
+            const note = el('input', { type:'text', placeholder:'Note', value: row.note || '' });
+            lead.addEventListener('input', () => { row.lead = lead.value; persist(card); });
+            txt.addEventListener('input',  () => { row.text = txt.value;  persist(card); });
+            note.addEventListener('input', () => { row.note = note.value; persist(card); });
+            const star = el('button', { class:'mini', title:'Toggle star' }, row.star?'★':'☆');
+            star.addEventListener('click', () => { row.star = !row.star; renderRows(); persist(card); });
+            const delR = el('button', { class:'mini', onclick:() => { sec.rows.splice(ri,1); renderRows(); persist(card); } }, '×');
+            rEl.appendChild(lead); rEl.appendChild(txt); rEl.appendChild(note); rEl.appendChild(star); rEl.appendChild(delR);
+            rowsHost.appendChild(rEl);
+          });
+        }
+        renderRows();
+        secEl.appendChild(rowsHost);
+        secEl.appendChild(el('button', { class:'mini', onclick:() => { sec.rows.push({ lead:'', text:'', note:'' }); renderRows(); persist(card); } }, '+ row'));
+        secsBox.appendChild(secEl);
+      });
+    }
+    renderSections();
+    secsWrap.appendChild(secsBox);
+    secsWrap.appendChild(el('button', { class:'mini', onclick:() => { card.sections.push({ title:'', band:'desc', align:'left', rows:[] }); renderSections(); persist(card); } }, '+ section'));
+    form.appendChild(secsWrap);
+
+    // ── Footer stats ──
     const statsWrap = el('div', { class:'ce-stats' });
     statsWrap.appendChild(el('label', {}, 'Footer stats'));
     card.stats = card.stats || [];
@@ -2385,6 +2483,7 @@ function openCardEditor() {
     statsWrap.appendChild(rowsBox);
     statsWrap.appendChild(el('button', { class:'mini', onclick:() => { card.stats.push({ label:'', value:'' }); persist(card); renderStats(); } }, '+ stat'));
     form.appendChild(statsWrap);
+
     formWrap.appendChild(form);
     previewEl = el('div', { class:'ce-preview' });
     previewEl.appendChild(renderCardFace(card, true));
