@@ -6,6 +6,15 @@ A browser-based virtual tabletop for [Deck Quest](https://www.garagesofagames.co
 
 *The GM view: multiple boards, a battlemap with character and NPC tokens, the deck & discard panel, dice/chat log, and the player roster.*
 
+## ▶ Live preview (no install)
+
+Try the app right in your browser — these demos are fully offline and pre-loaded with a battlemap, tokens, and cards. Nothing is saved or shared; it's just a sandbox to feel the controls (move tokens, draw with the pen, pan/zoom, draw cards, roll dice).
+
+- **[Try it as a Game Master →](https://riegodavid-git.github.io/deck-quest-vtt/gm-demo.html)**
+- **[Try it as a Player →](https://riegodavid-git.github.io/deck-quest-vtt/player-demo.html)**
+
+> Best in a Chromium browser (Chrome / Edge / Brave). The demos are standalone — the real app loads art from your own assets folder (see setup below).
+
 ---
 
 ## Download & Play

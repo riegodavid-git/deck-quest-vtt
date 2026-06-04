@@ -446,6 +446,7 @@ async function loadAssetAsDataUrl(relativePath) {
 // player uses hash-based ASSETS received via sendAsset from GM.
 function loadCardImage(relativePath, imgEl) {
   if (!relativePath) return;
+  if (window.DEMO) { const u = DEMO_CARD_IMAGES[relativePath]; if (u) { imgEl.src = u; imgEl.classList.remove('card-loading'); } return; }
   if (ROLE === 'gm') {
     loadAssetAsDataUrl(relativePath).then(url => { if (url) imgEl.src = url; });
   } else {
@@ -544,6 +545,8 @@ function logEntry(who, text, kind='info') {
     renderLog();
     broadcast({ type: 'state' });
     autosave();
+  } else if (window.DEMO) {
+    (LOCAL_VIEW.log = LOCAL_VIEW.log || []).push(entry); renderLog();
   } else {
     sendToGM({ type: 'log', entry });
   }
@@ -937,7 +940,31 @@ function sendToGM(msg) {
 }
 function sendOp(op) {
   if (ROLE === 'gm') applyOp(op, 'gm');
+  else if (window.DEMO) demoPlayerOp(op);   // offline demo: apply locally to LOCAL_VIEW
   else sendToGM({ type:'op', op });
+}
+// Minimal local applier for the offline player demo (only the ops a player triggers solo).
+function demoPlayerOp(op) {
+  const s = LOCAL_VIEW; if (!s) return; const tbl = s.table;
+  switch (op.type) {
+    case 'move-figurine': {
+      const f = tbl.figurines.find(x => x.instId === op.instId); if (!f) break;
+      ['x','y','w','h','rot','opacity','flipH','flipV','locked','label','showName'].forEach(k => { if (op[k] != null) f[k] = op[k]; });
+      break;
+    }
+    case 'move-table-card': { const c = tbl.cards.find(x => x.instId === op.instId); if (c) { c.x = op.x; c.y = op.y; } break; }
+    case 'flip-card': {
+      const c = op.where === 'table' ? tbl.cards.find(x => x.instId === op.instId)
+                                     : s.hands[op.owner]?.hand.find(x => x.instId === op.instId);
+      if (c) c.faceUp = !c.faceUp; break;
+    }
+    case 'add-drawing':       tbl.drawings.push({ id: uid(), by: MY_ID, ...op.stroke }); break;
+    case 'remove-drawing':    s.table.drawings = tbl.drawings.filter(d => d.id !== op.id); break;
+    case 'clear-my-drawings': s.table.drawings = tbl.drawings.filter(d => d.by !== MY_ID); break;
+    case 'send-chat':         (s.chat = s.chat || []).push({ who: op.who, text: op.text, color: op.color, ts: op.ts }); break;
+    default: return;
+  }
+  rerenderAll();
 }
 
 // =================== State operations (GM-applied) ===================
@@ -3008,6 +3035,7 @@ function playerJoinFlow() {
 
 // =================== Boot ===================
 async function boot() {
+  if (window.DEMO) return startDemo();   // offline live-preview — no networking, no assets folder
   // Warn before leaving if the GM has unsaved changes.
   window.addEventListener('beforeunload', e => {
     if (ROLE === 'gm' && _dirty) { e.preventDefault(); e.returnValue = ''; }
@@ -3035,6 +3063,33 @@ async function boot() {
   } else {
     playerJoinFlow();
   }
+}
+
+// =================== Offline demo mode (GitHub live preview) ===================
+// Activated only when window.DEMO is injected. No relay, no assets folder, no IndexedDB —
+// the board, tokens and cards are all embedded. Lets visitors try the app fully offline.
+let DEMO_CARD_IMAGES = {};
+function startDemo() {
+  DEMO_CARD_IMAGES = window.DEMO.cardImages || {};
+  ASSETS = window.DEMO.assets || {};
+  setupDiceUI();
+  setupToolbarUI();
+  setupTableInteraction();
+  setupFloatingPanels();
+  setupAltPreview();
+  setupKeybindHelp();
+  if (ROLE === 'gm') {
+    STATE = window.DEMO.state;
+    renderAllGM();
+  } else {
+    LOCAL_VIEW = window.DEMO.view;
+    MY_ID = window.DEMO.myId || 'player1';
+    MY_NAME = LOCAL_VIEW.hands?.[MY_ID]?.name || 'You';
+    renderAllPlayer();
+  }
+  const cs = $('#connStatus');
+  if (cs) { cs.innerHTML = '<span class="net-dot" style="background:#10b981"></span>Demo (offline)'; cs.setAttribute('data-tooltip', 'Live preview — nothing is saved or shared. Fully local.'); }
+  const rc = $('#roomCode'); if (rc) rc.textContent = 'DEMO';
 }
 
 // =================== Alt-hover card preview ===================
@@ -3388,6 +3443,7 @@ function setupToolbarUI() {
   tokenBtn.appendChild(tokenI); tb.appendChild(tokenBtn);
   // GM-only: token library, battlemaps browser, map upload, search
   if (ROLE === 'gm') {
+    if (!window.DEMO) {   // these need the GM's local assets folder — hidden in the offline demo
     const tokenLibBtn = el('button', { class:'tool-btn', title:'Browse & add D&D tokens', onclick: () => openTokenPanel() });
     tokenLibBtn.appendChild(icon('tokens'));
     tokenLibBtn.appendChild(el('span', {}, 'Tokens'));
@@ -3401,6 +3457,7 @@ function setupToolbarUI() {
     stampBtn.appendChild(icon('stamp'));
     stampBtn.appendChild(el('span', {}, 'Stamp'));
     tb.appendChild(stampBtn);
+    }
     const zoneBtn = el('button', { class:'tool-btn', 'data-tool':'spawnzone', title:'Set spawn zone for this board', onclick:() => setTool(spawnZoneMode ? 'pointer' : 'spawnzone') });
     zoneBtn.appendChild(icon('zone'));
     zoneBtn.appendChild(el('span', {}, 'Spawn'));
