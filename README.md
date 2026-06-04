@@ -2,6 +2,10 @@
 
 A browser-based virtual tabletop for [Deck Quest](https://www.garagesofagames.com/games/deck-quest), an open-ended card-based tabletop RPG. Two self-contained HTML files — one for the GM, one for players — sync in real time over a WebSocket relay so your group can play together remotely with no installs, no accounts, and no setup beyond downloading a file.
 
+![Deck Quest VTT — GM screen](docs/gm-screen.png)
+
+*The GM view: multiple boards, a battlemap with character and NPC tokens, the deck & discard panel, dice/chat log, and the player roster.*
+
 ---
 
 ## Download & Play
