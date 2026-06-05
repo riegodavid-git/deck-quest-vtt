@@ -163,7 +163,10 @@ function main() {
   };
 
   // ── Emit the two HTML files ───────────────────────────────────────────────
-  const shared   = fs.readFileSync(path.join(TEMPLATES, 'shared.js'), 'utf8');
+  const engineSrc = fs.readFileSync(path.join(ROOT, 'engine.mjs'), 'utf8').replace(/^export\s+/gm, '');
+  const engineNs  = '/* ===== ENGINE (inlined) ===== */\nconst ENGINE = (function(){\n' + engineSrc
+    + '\nreturn { newState, migrateState, normalizeZ, applyOp, viewFor, canApply, ensureCharacterToken, ensureCharactersOnBoard, pickSpawnPoint, boardById, TABLE_OPS };\n})();\n';
+  const shared   = engineNs + '\n' + fs.readFileSync(path.join(TEMPLATES, 'shared.js'), 'utf8');
   const fontsCss = loadFonts();
   const cardsJson = JSON.stringify(catalog);
   if (!fs.existsSync(DOCS)) fs.mkdirSync(DOCS);
@@ -182,7 +185,7 @@ function main() {
   }
 
   emit('gm.template.html',     'gm-demo.html',     'gm',     { state: gmState });
-  emit('player.template.html', 'player-demo.html', 'player', { view, myId:'player1' });
+  emit('player.template.html', 'player-demo.html', 'player', { state: gmState, myId:'player1' });
   console.log(`Embedded: 1 map, ${tokenPaths.length} tokens, ${Object.keys(cardImages).length} card images.`);
   console.log('Done.');
 }

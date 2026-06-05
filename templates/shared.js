@@ -21,6 +21,8 @@ const NOUN = ['falcon','dragon','wolf','tiger','phoenix','kraken','griffin','vip
 const CARDS_BY_ID = {};
 const CARDS_BY_TYPE = { role:[], skill:[], item:[], location:[], adversary:[], info:[] };
 for (const c of CARDS) { CARDS_BY_ID[c.id] = c; CARDS_BY_TYPE[c.type].push(c); }
+// Deck source for the engine — arrays of card IDs (the engine works with ids, not card objects).
+const CARD_IDS_BY_TYPE = Object.fromEntries(Object.entries(CARDS_BY_TYPE).map(([t, a]) => [t, a.map(c => c.id)]));
 
 // Built-in token lookup — id → token object
 const TOKENS_BY_ID = {};
@@ -182,39 +184,32 @@ function normalizeZ(state) {
 }
 
 // ── Board management (GM only) ───────────────────────────────────────────────
-function gmSwitchView(id) {        // GM previews/edits a board; players unaffected
-  STATE.gmViewBoardId = id;
+function gmSwitchView(id) {        // GM previews/edits a board locally; players unaffected
+  gmViewBoardId = id;
   STATE.table = boardById(id).table;
   selectionSet.clear();
   renderAllGM();
-  autosave();
 }
 function addBoard() {
-  const b = { id: uid(), name: 'Board ' + (STATE.boards.length + 1), table: { cards: [], figurines: [], drawings: [] } };
-  STATE.boards.push(b);
-  gmSwitchView(b.id);
+  const id = uid();
+  sendOp({ type:'board-add', id, name: 'Board ' + (STATE.boards.length + 1) });
+  gmViewBoardId = id;   // preview the new board as soon as it arrives
 }
 function renameBoard(id) {
   const b = boardById(id); const v = prompt('Board name:', b.name);
-  if (v != null && v.trim()) { b.name = v.trim(); renderBoardBar(); autosave(); }
+  if (v != null && v.trim()) sendOp({ type:'board-rename', id, name: v.trim() });
 }
 function duplicateBoard(id) {
-  const src = boardById(id);
-  const table = JSON.parse(JSON.stringify(src.table));
-  for (const f of table.figurines) f.instId = uid();
-  for (const c of table.cards) c.instId = uid();
-  for (const d of table.drawings) d.id = uid();
-  const b = { id: uid(), name: src.name + ' copy', table };
-  STATE.boards.push(b);
-  gmSwitchView(b.id);
+  const newId = uid();
+  sendOp({ type:'board-duplicate', id, newId });
+  gmViewBoardId = newId;
 }
 function deleteBoard(id) {
   if (STATE.boards.length <= 1) return alert("Can't delete the only board.");
   if (id === STATE.activeBoardId) return alert("Can't delete the live board — activate a different board first.");
   if (!confirm('Delete this board?')) return;
-  STATE.boards = STATE.boards.filter(b => b.id !== id);
-  if (STATE.gmViewBoardId === id) gmSwitchView(STATE.boards[0].id);
-  else { renderBoardBar(); autosave(); }
+  if (gmViewBoardId === id) gmSwitchView(STATE.boards[0].id);
+  sendOp({ type:'board-delete', id });
 }
 // A spawn point inside a board's zone (scattered, non-overlapping) or near board center.
 function pickSpawnPoint(board, placed) {
@@ -258,24 +253,19 @@ function ensureCharactersOnBoard(boardId) {
   }
 }
 function activateBoard(id) {        // make a board the live one players see
-  STATE.activeBoardId = id;
-  ensureCharactersOnBoard(id);      // first-time players spawn in the zone; returning keep position; chars on top
-  logEntry('GM', 'activated board: ' + boardById(id).name, 'sys');
-  broadcast({ type: 'state' });     // players switch to the new active board
-  renderAllGM();
-  autosaveNow();
+  sendOp({ type:'board-activate', id });   // host spawns characters, logs, and broadcasts
 }
 function renderBoardBar() {
   if (ROLE !== 'gm') return;
   const bar = $('#boardBar'); if (!bar || !STATE || !STATE.boards) return;
   bar.innerHTML = '';
   for (const b of STATE.boards) {
-    const isView = b.id === STATE.gmViewBoardId;
+    const isView = b.id === gmViewBoardId;
     const isLive = b.id === STATE.activeBoardId;
     const chip = el('div', { class:'board-chip' + (isView ? ' viewing' : '') + (isLive ? ' live' : ''), title: isLive ? 'LIVE — players see this board' : 'Click to preview/edit' });
     chip.appendChild(el('span', { class:'board-name' }, b.name));
     if (isLive) chip.appendChild(el('span', { class:'board-live-dot', title:'Live' }, '●'));
-    chip.addEventListener('click', () => { if (b.id !== STATE.gmViewBoardId) gmSwitchView(b.id); });
+    chip.addEventListener('click', () => { if (b.id !== gmViewBoardId) gmSwitchView(b.id); });
     chip.addEventListener('contextmenu', e => { e.preventDefault(); showBoardMenu(b, e); });
     if (isView && !isLive) {
       const act = el('button', { class:'board-activate', title:'Show this board to players' }, 'Activate');
@@ -430,15 +420,13 @@ async function loadAssetAsDataUrl(relativePath) {
       res(dataUrl);
       // GM: register hash+path in assetMeta and push to connected players
       // so they can render cards/tokens received via state
-      if (ROLE === 'gm' && STATE?.assetMeta) {
+      if (ROLE === 'gm' && !window.DEMO) {
+        // GM caches card art locally only. Players pull each card on demand
+        // (card-request) — never bulk-pushed — so the relay isn't flooded.
         try {
           const hash = await hashBlob(dataUrl);
           PATH_TO_HASH[relativePath] = hash;
           ASSETS[hash] = dataUrl;
-          if (!STATE.assetMeta[hash]) {
-            STATE.assetMeta[hash] = { kind: 'asset', size: dataUrl.length, path: relativePath };
-            for (const conn of Object.values(connections)) sendAsset(conn, hash, dataUrl, 'asset');
-          }
         } catch (_) {}
       }
     };
@@ -460,11 +448,21 @@ function loadCardImage(relativePath, imgEl) {
       imgEl.src = ASSETS[hash];
       imgEl.classList.remove('card-loading');
     } else {
-      // Shimmer until image arrives; rerenderAll() from handleAssetMessage
-      // will re-call loadCardImage, find the image, and clear the shimmer.
+      // Shimmer + ask the GM for just this one card. When it arrives,
+      // handleAssetMessage → rerenderAll re-calls loadCardImage and clears the shimmer.
       imgEl.classList.add('card-loading');
+      requestCardArt(relativePath);
     }
   }
+}
+// Player-side lazy card-art pull: request a single card image from the GM, deduped.
+const _cardArtReq = {};
+function requestCardArt(path) {
+  if (!path || ROLE === 'gm' || window.DEMO) return;
+  const t = Date.now();
+  if (_cardArtReq[path] && t - _cardArtReq[path] < 15000) return;   // one request per card per 15s
+  _cardArtReq[path] = t;
+  sendToServer({ type:'card-request', path });
 }
 
 // =================== State ===================
@@ -543,18 +541,7 @@ function activeState() { return ROLE === 'gm' ? STATE : LOCAL_VIEW; }
 
 // =================== Logging ===================
 function logEntry(who, text, kind='info') {
-  const entry = { ts: Date.now(), who, text, kind };
-  if (ROLE === 'gm') {
-    STATE.log.push(entry);
-    if (STATE.log.length > 200) STATE.log.shift();
-    renderLog();
-    broadcast({ type: 'state' });
-    autosave();
-  } else if (window.DEMO) {
-    (LOCAL_VIEW.log = LOCAL_VIEW.log || []).push(entry); renderLog();
-  } else {
-    sendToGM({ type: 'log', entry });
-  }
+  sendOp({ type:'log', who, text, kind });   // host appends to the shared log and broadcasts
 }
 function renderLog() {
   const log = activeState()?.log || [];
@@ -589,22 +576,14 @@ function rollAndLog(spec) {
   const sum = rolls.reduce((a,b)=>a+b,0) + mod;
   const detail = (n>1 ? `[${rolls.join(',')}]` : `${rolls[0]}`) + (mod ? (mod>0?` +${mod}`:` ${mod}`) : '');
   const txt = `rolled ${spec}${statTxt} → ${detail} = ${sum}`;
-  if (ROLE === 'gm') {
-    STATE.log.push({ ts:Date.now(), who:MY_NAME, text:txt, kind:'roll', color:MY_COLOR });
-    if (STATE.log.length>200) STATE.log.shift();
-    renderLog(); broadcast({ type:'state' }); autosave();
-  } else {
-    sendToGM({ type:'log', entry:{ ts:Date.now(), who:MY_NAME, text:txt, kind:'roll', color:MY_COLOR } });
-  }
+  sendOp({ type:'log', who: MY_NAME, text: txt, kind:'roll', color: MY_COLOR });
 }
 
-// =================== WebSocket relay networking ===================
-// ┌─────────────────────────────────────────────────────────────────┐
-// │  RELAY_URL — update this after deploying relay/server.js        │
-// │  to Render.com, then run  node build.js  to rebuild the HTMLs.  │
-// │  Example: 'wss://deck-quest-relay.onrender.com'                 │
-// └─────────────────────────────────────────────────────────────────┘
-const RELAY_URL = 'wss://deck-quest-vtt.onrender.com';
+// =================== Authoritative host (Cloudflare Durable Object) ===========
+// The game state lives in a per-room Durable Object (relay-cf/). Clients — GM and
+// players alike — send ops and render the view the host broadcasts. Connect to
+// RELAY_URL + '/r/<roomCode>'. Set RELAY_URL after `wrangler deploy` (relay-cf/).
+const RELAY_URL = 'wss://deck-quest-vtt.david-riego-01.workers.dev';
 
 let wsConn = null;
 let _netPingTimer = null;
@@ -615,15 +594,12 @@ let _netPingSent  = 0;
 // unrelated full-state broadcast can't snap a just-moved token back.
 const pendingMoves = {}; // instId -> { x, y, timer }
 
-function broadcastMovePatch(patch) {
-  if (ROLE !== 'gm') return;
-  const msg = { type: 'move-patch', ...patch };
-  for (const conn of Object.values(connections)) conn.send(msg);
-}
+// Optimistic movement: a client moves locally, then the host's authoritative
+// move-patch confirms it. Both GM and players use this now.
+function tableOf() { const s = activeState(); return s && s.table ? s.table : null; }
 function markOptimisticMove(instId, x, y) {
-  if (ROLE === 'gm' || !LOCAL_VIEW) return;
-  const obj = LOCAL_VIEW.table.figurines.find(f => f.instId === instId)
-           || LOCAL_VIEW.table.cards.find(c => c.instId === instId);
+  const tbl = tableOf(); if (!tbl) return;
+  const obj = tbl.figurines.find(f => f.instId === instId) || tbl.cards.find(c => c.instId === instId);
   if (obj) { obj.x = x; obj.y = y; }
   if (pendingMoves[instId]?.timer) clearTimeout(pendingMoves[instId].timer);
   pendingMoves[instId] = { x, y, timer: setTimeout(() => { delete pendingMoves[instId]; }, 3000) };
@@ -632,19 +608,18 @@ function clearPendingMove(instId) {
   if (pendingMoves[instId]) { clearTimeout(pendingMoves[instId].timer); delete pendingMoves[instId]; }
 }
 function reapplyPendingMoves() {
-  if (!LOCAL_VIEW) return;
+  const tbl = tableOf(); if (!tbl) return;
   for (const [instId, pm] of Object.entries(pendingMoves)) {
-    const obj = LOCAL_VIEW.table.figurines.find(f => f.instId === instId)
-             || LOCAL_VIEW.table.cards.find(c => c.instId === instId);
+    const obj = tbl.figurines.find(f => f.instId === instId) || tbl.cards.find(c => c.instId === instId);
     if (obj) { obj.x = pm.x; obj.y = pm.y; }
   }
 }
 function applyMovePatch(p) {
-  if (!LOCAL_VIEW) return;
-  const arr = p.kind === 'card' ? LOCAL_VIEW.table.cards : LOCAL_VIEW.table.figurines;
+  const tbl = tableOf(); if (!tbl) return;
+  const arr = p.kind === 'card' ? tbl.cards : tbl.figurines;
   const obj = arr.find(o => o.instId === p.instId);
   if (obj) { obj.x = p.x; obj.y = p.y; if (p.z != null) obj.z = p.z; }
-  clearPendingMove(p.instId); // GM confirmed this position
+  clearPendingMove(p.instId);
   const dom = document.querySelector(`[data-inst-id="${p.instId}"]`);
   if (dom) { dom.style.left = p.x + 'px'; dom.style.top = p.y + 'px'; if (p.z != null) dom.style.zIndex = p.z; }
 }
@@ -681,98 +656,95 @@ function updateNetStatus(online, ms) {
   el.innerHTML = `<span class="net-dot" style="background:${dotColor}"></span>${label}`;
   el.setAttribute('data-tooltip', tip);
 }
-let connections = {};    // GM: { slot: fakeConn }. Player: { gm: fakeConn }
 let cursorThrottle = 0;
+let gmViewBoardId = null;   // GM-only, client-local: which board the GM previews/edits
 
-// Lightweight fake-connection object so all existing broadcast/sendToGM
-// code continues to work without changes.
-function makeConn(slot) {
-  return {
-    _playerId: slot,
-    open: true,
-    close() { /* no-op; server handles teardown */ },
-    send(msg) {
-      if (wsConn && wsConn.readyState === WebSocket.OPEN) {
-        wsConn.send(JSON.stringify({ to: slot, msg }));
-      }
-    },
-  };
-}
-
-function setupPeerGM(roomCode) {
-  if (wsConn) wsConn.close();
-  wsConn = new WebSocket(RELAY_URL);
+// Connect to the authoritative host (Durable Object) for this room.
+// GM and players use the same path; the host decides what each may do.
+function setupPeer(room) {
+  MY_ROOM = room;
+  if (wsConn) { try { wsConn.close(); } catch {} }
+  wsConn = new WebSocket(RELAY_URL + '/r/' + encodeURIComponent(room));
   wsConn.onopen = () => {
-    wsConn.send(JSON.stringify({ type: 'register', room: roomCode, role: 'gm' }));
-    $('#roomCode').textContent = roomCode;
+    if (ROLE === 'gm') {
+      wsConn.send(JSON.stringify({ type:'register', role:'gm' }));
+    } else {
+      wsConn.send(JSON.stringify({ type:'register', role:'player', slot: MY_ID, name: MY_NAME, pfpHash: window._pendingPfpHash || null }));
+      if (window._pendingPfp) { sendAsset(window._pendingPfpHash, window._pendingPfp, 'pfp'); delete window._pendingPfp; }
+    }
+    const rc = $('#roomCode'); if (rc) rc.textContent = room;
     startNetMonitor();
   };
-  wsConn.onmessage = e => {
-    let data; try { data = JSON.parse(e.data); } catch { return; }
-    if (data.type === 'pong') { updateNetStatus(true, Date.now() - data.ts); return; }
-    // Internal lifecycle: player WebSocket connected/disconnected
-    if (data.type === '_ws-connected') {
-      const slot = data.slot;
-      if (!connections[slot]) connections[slot] = makeConn(slot);
-      connections[slot].open = true;
-      return;
-    }
-    if (data.type === '_ws-disconnected') {
-      const slot = data.slot;
-      onPlayerDisconnect(connections[slot] || { _playerId: slot });
-      return;
-    }
-    // Game message from a player: { from: slot, msg: {...} }
-    if (data.from) {
-      const slot = data.from;
-      if (!connections[slot]) connections[slot] = makeConn(slot);
-      handleFromPlayer(connections[slot], data.msg);
-    }
-  };
+  wsConn.onmessage = e => { let d; try { d = JSON.parse(e.data); } catch { return; } handleFromServer(d); };
   wsConn.onclose = () => { clearInterval(_netPingTimer); updateNetStatus(false, null); };
   wsConn.onerror = () => { updateNetStatus(false, null); };
 }
+function sendToServer(msg) { if (wsConn && wsConn.readyState === WebSocket.OPEN) wsConn.send(JSON.stringify(msg)); }
 
-function setupPeerPlayer(roomCode) {
-  if (wsConn) wsConn.close();
-  wsConn = new WebSocket(RELAY_URL);
-  wsConn.onopen = () => {
-    wsConn.send(JSON.stringify({ type: 'register', room: roomCode, role: 'player', slot: MY_ID }));
-    connections.gm = makeConn('gm');
-    connections.gm.open = true;
-    connections.gm.send({ type: 'join', slot: MY_ID, name: MY_NAME, pfpHash: window._pendingPfpHash || null });
-    if (window._pendingPfp) {
-      sendAsset(connections.gm, window._pendingPfpHash, window._pendingPfp, 'pfp');
-      delete window._pendingPfp;
-    }
-    startNetMonitor();
-  };
-  wsConn.onmessage = e => {
-    let data; try { data = JSON.parse(e.data); } catch { return; }
-    handleFromGM(data);
-  };
-  wsConn.onclose = () => {
-    $('#connStatus').textContent = 'GM offline';
-    if (connections.gm) connections.gm.open = false;
-  };
-  wsConn.onclose = () => { clearInterval(_netPingTimer); updateNetStatus(false, null); if (connections.gm) connections.gm.open = false; };
-  wsConn.onerror = () => { updateNetStatus(false, null); };
+// Adopt a full authoritative view from the host.
+function applyServerState(d) {
+  if (d.myId) MY_ID = d.myId;
+  if (ROLE === 'gm') {
+    STATE = d.view;
+    if (!gmViewBoardId || !STATE.boards.some(b => b.id === gmViewBoardId)) gmViewBoardId = STATE.activeBoardId;
+    STATE.table = (STATE.boards.find(b => b.id === gmViewBoardId) || STATE.boards[0]).table;
+    reapplyPendingMoves();
+    renderAllGM();
+  } else {
+    LOCAL_VIEW = d.view;
+    reapplyPendingMoves();
+    renderAllPlayer();
+  }
+  requestMissingAssets((activeState() || {}).assetMeta);
+  renderChatPanel();
+}
+
+function handleFromServer(d) {
+  switch (d.type) {
+    case 'pong': updateNetStatus(true, Date.now() - d.ts); return;
+    case 'need-init': if (ROLE === 'gm' && STATE) sendToServer({ type:'init-state', state: STATE }); return;
+    case 'waiting': updateNetStatus(true, null); return;
+    case 'state': applyServerState(d); return;
+    case 'move-patch': applyMovePatch(d); return;
+    case 'cursor-update': drawCursor(d.who, d.x, d.y, d.color, d.name, d.pfpHash); return;
+    case 'asset-begin': case 'asset-chunk': case 'asset-end': handleAssetMessage(d); return;
+    case 'asset-request':  // the host forwarded a peer's request to us — send the bytes back to them
+      if (ASSETS[d.hash]) sendAsset(d.hash, ASSETS[d.hash], (activeState()?.assetMeta?.[d.hash]?.kind) || 'figurine', d.from);
+      return;
+    case 'card-request':   // a player needs a card image — load it from our folder, send only to them
+      if (ROLE === 'gm' && d.path) loadAssetAsDataUrl(d.path).then(async dataUrl => {
+        if (!dataUrl) return;
+        const hash = await hashBlob(dataUrl);
+        sendAsset(hash, dataUrl, 'card', d.from, d.path);
+      });
+      return;
+  }
 }
 
 // ---- Chunked asset transfer ----
 const CHUNK_SIZE = 14000; // bytes of base64 per chunk; safe under typical data-channel limits
 const incomingAssets = {}; // hash -> { kind, parts:[], total }
 
-function sendAsset(conn, hash, dataUrl, kind) {
+// Stream an asset to the host, which relays it to `to` (a clientId) or, if omitted,
+// to every other client. Clients cache locally; the host only tracks assetMeta.
+async function sendAsset(hash, dataUrl, kind, to, path) {
+  if (!wsConn || wsConn.readyState !== WebSocket.OPEN) return;
   const total = Math.ceil(dataUrl.length / CHUNK_SIZE);
-  conn.send({ type:'asset-begin', hash, kind, total });
+  wsConn.send(JSON.stringify({ type:'asset-begin', hash, kind, total, to, path }));
   for (let i=0;i<total;i++) {
-    conn.send({ type:'asset-chunk', hash, index:i, data: dataUrl.slice(i*CHUNK_SIZE, (i+1)*CHUNK_SIZE) });
+    // Backpressure: keep the socket's send buffer small so ops/pings/cursors stay
+    // responsive even while a big image is uploading (no head-of-line blocking).
+    while (wsConn.bufferedAmount > 64 * 1024) {
+      await new Promise(r => setTimeout(r, 15));
+      if (!wsConn || wsConn.readyState !== WebSocket.OPEN) return;
+    }
+    wsConn.send(JSON.stringify({ type:'asset-chunk', hash, index:i, data: dataUrl.slice(i*CHUNK_SIZE, (i+1)*CHUNK_SIZE), to }));
   }
-  conn.send({ type:'asset-end', hash });
+  wsConn.send(JSON.stringify({ type:'asset-end', hash, kind, to, path }));
 }
 
-async function handleAssetMessage(data, fromConn) {
+// Reassemble an incoming asset and cache it. (Relay/meta-tracking is the host's job.)
+async function handleAssetMessage(data) {
   if (data.type === 'asset-begin') {
     incomingAssets[data.hash] = { kind:data.kind, parts:new Array(data.total), total:data.total };
   } else if (data.type === 'asset-chunk') {
@@ -782,29 +754,15 @@ async function handleAssetMessage(data, fromConn) {
     const inc = incomingAssets[data.hash]; if (!inc) return;
     const dataUrl = inc.parts.join('');
     ASSETS[data.hash] = dataUrl;
-    await cacheAssetPut(data.hash, { kind: inc.kind, dataUrl });
+    await cacheAssetPut(data.hash, { kind: inc.kind || data.kind, dataUrl });
     delete incomingAssets[data.hash];
-    // Update path→hash map so card rendering can find the image
-    const assetPath = activeState()?.assetMeta?.[data.hash]?.path;
+    const assetPath = data.path || activeState()?.assetMeta?.[data.hash]?.path;
     if (assetPath) PATH_TO_HASH[assetPath] = data.hash;
-    if (ROLE === 'gm') {
-      STATE.assetMeta[data.hash] = { kind: inc.kind, size: dataUrl.length };
-      // forward to all other players
-      for (const [pid, c] of Object.entries(connections)) {
-        if (c !== fromConn) sendAsset(c, data.hash, dataUrl, inc.kind);
-      }
-      broadcast({ type:'state' });
-      autosave();
-    }
     rerenderAll();
-  } else if (data.type === 'asset-request') {
-    const dataUrl = ASSETS[data.hash];
-    if (dataUrl) sendAsset(fromConn, data.hash, dataUrl, (STATE?.assetMeta?.[data.hash]?.kind) || 'figurine');
   }
 }
 
 function requestMissingAssets(meta) {
-  // Player side: compare meta vs local cache; request anything missing.
   for (const hash of Object.keys(meta || {})) {
     const p = meta[hash]?.path;
     if (ASSETS[hash]) { if (p) PATH_TO_HASH[p] = hash; continue; }
@@ -814,155 +772,42 @@ function requestMissingAssets(meta) {
         if (p) PATH_TO_HASH[p] = hash;
         rerenderAll();
       } else {
-        connections.gm?.send({ type:'asset-request', hash });
+        sendToServer({ type:'asset-request', hash });
       }
     });
   }
 }
 
-// ---- Message handlers ----
-function handleFromPlayer(conn, data) {
-  if (['asset-begin','asset-chunk','asset-end','asset-request'].includes(data.type)) {
-    return handleAssetMessage(data, conn);
-  }
-  if (data.type === 'join') {
-    const slot = data.slot;
-    if (!STATE.hands[slot]) {
-      conn.send({ type:'join-rejected', reason:'No such slot.' });
-      conn.close(); return;
-    }
-    // Slots aren't reserved — players coordinate among themselves. A join always
-    // (re)claims the slot, replacing whoever was previously there.
-    connections[slot] = conn;
-    conn._playerId = slot;
-    STATE.hands[slot].name = data.name || ('Player ' + slot.slice(6));
-    STATE.hands[slot].pfpHash = data.pfpHash || STATE.hands[slot].pfpHash;
-    STATE.hands[slot].connected = true;
-    logEntry(STATE.hands[slot].name, 'joined', 'sys');
-    // Auto-add a character token for this player on first join (if they have a pfp).
-    if (STATE.hands[slot].pfpHash) ensureCharacterToken(slot);
-    // send the new player their initial filtered view + ID
-    conn.send({ type:'state', view: viewFor(slot), myId: slot });
-    return;
-  }
-  if (data.type === 'log') {
-    STATE.log.push({ ...data.entry });
-    if (STATE.log.length>200) STATE.log.shift();
-    renderLog(); broadcast({ type:'state' }); autosave(); return;
-  }
-  if (data.type === 'cursor') {
-    broadcastCursor(conn._playerId, data.x, data.y);
-    return;
-  }
-  if (data.type === 'draw-stroke') {
-    boardById(STATE.activeBoardId).table.drawings.push({ id: uid(), by: conn._playerId, ...data.stroke });
-    broadcast({ type:'state' }); renderTable(); autosave(); return;
-  }
-  if (data.type === 'op') return applyOp(data.op, conn._playerId);
-}
-
-function handleFromGM(data) {
-  if (data.type === 'pong') { updateNetStatus(true, Date.now() - data.ts); return; }
-  if (data.type === 'move-patch') { applyMovePatch(data); return; }
-  if (['asset-begin','asset-chunk','asset-end'].includes(data.type)) return handleAssetMessage(data, connections.gm);
-  if (data.type === 'state') {
-
-    LOCAL_VIEW = data.view;
-    if (data.myId) MY_ID = data.myId;
-    reapplyPendingMoves(); // keep our just-moved tokens put; don't snap back on unrelated broadcasts
-    rerenderAll();
-    requestMissingAssets(LOCAL_VIEW.assetMeta);
-    renderChatPanel();
-    return;
-  }
-  if (data.type === 'cursor-update') {
-    drawCursor(data.who, data.x, data.y, data.color, data.name, data.pfpHash);
-    return;
-  }
-  if (data.type === 'join-rejected') {
-    alert('Could not join: ' + (data.reason || 'unknown reason'));
-    location.reload();
-    return;
-  }
-}
-
-function ensureCharacterToken(playerId) {
-  // GM only: make sure this player has a character token on the LIVE board.
-  if (ROLE !== 'gm' || !STATE) return;
-  const board = boardById(STATE.activeBoardId); const tbl = board.table;
-  if (tbl.figurines.some(f => f.kind === 'character' && f.playerId === playerId)) return;
-  const placed = tbl.figurines.filter(f => f.kind === 'character');
-  const pt = pickSpawnPoint(board, placed);
-  tbl.figurines.push({
-    instId: uid(), kind:'character', playerId,
-    x: pt.x, y: pt.y, w: 80, h: 80, rot: 0, z: nextZ(),
-    opacity: 1, locked: false, flipH:false, flipV:false,
-    label: STATE.hands[playerId]?.name || playerId,
-    effects: {},
-  });
-}
-
-function onPlayerDisconnect(conn) {
-  const pid = conn._playerId; if (!pid) return;
-  delete connections[pid];
-  if (STATE.hands[pid]) { STATE.hands[pid].connected = false; logEntry(STATE.hands[pid].name || pid, 'disconnected', 'sys'); }
-  broadcast({ type:'state' });
-}
-
-function broadcast(msg) {
-  if (ROLE !== 'gm') return;
-  for (const [pid, conn] of Object.entries(connections)) {
-    if (msg.type === 'state') conn.send({ type:'state', view: viewFor(pid), myId: pid });
-    else conn.send(msg);
-  }
-  rerenderAll();
-}
-
-function broadcastCursor(who, x, y) {
-  if (ROLE !== 'gm') return;
-  const player = STATE.hands[who];
-  const payload = { type:'cursor-update', who, x, y, color: player?.color || '#fff', name: player?.name || who, pfpHash: player?.pfpHash };
-  for (const c of Object.values(connections)) c.send(payload);
-  drawCursor(who, x, y, payload.color, payload.name, payload.pfpHash);
-}
-
-function sendToGM(msg) {
-  connections.gm?.send(msg);
+// ---- Sending ops to the authoritative host ----
+// GM and players both just send ops; the host validates (canApply) and broadcasts.
+function tagBoard(op) {
+  if (ROLE === 'gm' && op && ENGINE.TABLE_OPS && ENGINE.TABLE_OPS.has(op.type) && op.boardId == null) op.boardId = gmViewBoardId;
 }
 function sendOp(op) {
-  if (ROLE === 'gm') applyOp(op, 'gm');
-  else if (window.DEMO) demoPlayerOp(op);   // offline demo: apply locally to LOCAL_VIEW
-  else sendToGM({ type:'op', op });
+  if (ROLE === 'gm') { tagBoard(op); if (op.type === 'batch') (op.ops || []).forEach(tagBoard); }
+  if (window.DEMO) return demoApply(op);
+  sendToServer({ type:'op', op });
 }
-// Minimal local applier for the offline player demo (only the ops a player triggers solo).
-function demoPlayerOp(op) {
-  const s = LOCAL_VIEW; if (!s) return; const tbl = s.table;
-  switch (op.type) {
-    case 'move-figurine': {
-      const f = tbl.figurines.find(x => x.instId === op.instId); if (!f) break;
-      ['x','y','w','h','rot','opacity','flipH','flipV','locked','label','showName'].forEach(k => { if (op[k] != null) f[k] = op[k]; });
-      break;
-    }
-    case 'move-table-card': { const c = tbl.cards.find(x => x.instId === op.instId); if (c) { c.x = op.x; c.y = op.y; } break; }
-    case 'flip-card': {
-      const c = op.where === 'table' ? tbl.cards.find(x => x.instId === op.instId)
-                                     : s.hands[op.owner]?.hand.find(x => x.instId === op.instId);
-      if (c) c.faceUp = !c.faceUp; break;
-    }
-    case 'add-drawing':       tbl.drawings.push({ id: uid(), by: MY_ID, ...op.stroke }); break;
-    case 'remove-drawing':    s.table.drawings = tbl.drawings.filter(d => d.id !== op.id); break;
-    case 'clear-my-drawings': s.table.drawings = tbl.drawings.filter(d => d.by !== MY_ID); break;
-    case 'send-chat':         (s.chat = s.chat || []).push({ who: op.who, text: op.text, color: op.color, ts: op.ts }); break;
-    case 'set-player-field': {
-      const pl = s.hands[op.owner]; if (!pl) break;
-      const parts = op.path.split('.');           // e.g. 'stats.str', 'hp.current', 'name'
-      let o = pl; for (let i=0;i<parts.length-1;i++) o = o[parts[i]];
-      o[parts[parts.length-1]] = op.value;
-      break;
-    }
-    default: return;
+
+// ---- Offline demo: run the engine locally as a stand-in host ----
+function demoConnected() { return demoGame ? Object.keys(demoGame.hands).filter(k => k !== 'gm') : []; }
+function demoApply(op) {
+  if (!demoGame) return;
+  const res = ENGINE.applyOp(demoGame, op, ROLE === 'gm' ? 'gm' : MY_ID, { connected: demoConnected() });
+  if (res && res.rejected) return;
+  projectDemo();
+}
+function projectDemo() {
+  if (!demoGame) return;
+  if (ROLE === 'gm') {
+    STATE = ENGINE.viewFor(demoGame, 'gm');
+    if (!gmViewBoardId || !STATE.boards.some(b => b.id === gmViewBoardId)) gmViewBoardId = STATE.activeBoardId;
+    STATE.table = (STATE.boards.find(b => b.id === gmViewBoardId) || STATE.boards[0]).table;
+    renderAllGM();
+  } else {
+    LOCAL_VIEW = ENGINE.viewFor(demoGame, MY_ID);
+    renderAllPlayer();
   }
-  rerenderAll();
 }
 
 // =================== State operations (GM-applied) ===================
@@ -1221,16 +1066,19 @@ function loadSessionFile(file) {
   const r = new FileReader();
   r.onload = async () => {
     const snap = JSON.parse(r.result);
-    STATE = snap.state;
-    migrateState(STATE); normalizeZ(STATE);
+    MY_ID = 'gm';
+    STATE = ENGINE.migrateState(snap.state, id => CARDS_BY_ID[id]?.type);
+    ENGINE.normalizeZ(STATE);
+    STATE.roomCode = randomRoom();   // load into a fresh room so the host adopts it cleanly
+    gmViewBoardId = STATE.activeBoardId;
+    STATE.table = boardById(STATE.activeBoardId).table;
     ASSETS = snap.assets || {};
     for (const [hash, dataUrl] of Object.entries(ASSETS)) {
-      const meta = STATE.assetMeta[hash] || { kind: 'figurine' };
+      const meta = STATE.assetMeta?.[hash] || { kind: 'figurine' };
       await cacheAssetPut(hash, { kind: meta.kind, dataUrl });
     }
-    setupPeerGM(STATE.roomCode);
     renderAllGM();
-    logEntry('GM', 'loaded session', 'sys');
+    setupPeer(STATE.roomCode);
     _dirty = false;   // just loaded — matches the file on disk
   };
   r.readAsText(file);
@@ -1339,6 +1187,7 @@ function renderTableCards() {
   layer.innerHTML = '';
   for (const c of s.table.cards) {
     const card = CARDS_BY_ID[c.cardId];
+    if (!card) continue;   // unknown card id — skip rather than crash the whole render
     const div = el('div', { class:'placed-card' + (c.locked?' locked':'') + (selectionSet.has(c.instId)?' selected':'') + (c.groupId?' grouped':''), style:{ left:c.x+'px', top:c.y+'px', transform:`rotate(${c.rot||0}deg)`, zIndex:c.z||1 }, 'data-inst-id': c.instId });
     const cimg = el('img', { class:'card-img', draggable:'false' });
     cimg.style.background = 'var(--panel)';
@@ -2307,14 +2156,7 @@ function openSearch(filterType) {
   input.focus(); update();
 }
 function spawnSpecificCard(cardId, target) {
-  // Remove from deck if present, then add to target as an instance
-  const t = CARDS_BY_ID[cardId].type;
-  const i = STATE.decks[t].indexOf(cardId);
-  if (i >= 0) STATE.decks[t].splice(i, 1);
-  const inst = { instId: uid(), cardId, faceUp: target === 'gm' || target === 'table' };
-  if (target === 'table') STATE.table.cards.push({ ...inst, x:400, y:300, rot:0, z:nextZ() });
-  else STATE.hands[target].hand.push(inst);
-  broadcast({ type:'state' }); renderAllGM(); autosave();
+  sendOp({ type:'spawn-card', cardId, deck: CARDS_BY_ID[cardId].type, to: target });
 }
 
 // =================== Drawing & cursor on table ===================
@@ -2393,7 +2235,7 @@ function setupTableInteraction() {
       draft.remove();
       const b = bounds(ev);
       if (b.w > 20 && b.h > 20) {
-        boardById(STATE.gmViewBoardId).spawnZone = { x:Math.round(b.x), y:Math.round(b.y), w:Math.round(b.w), h:Math.round(b.h) };
+        boardById(gmViewBoardId).spawnZone = { x:Math.round(b.x), y:Math.round(b.y), w:Math.round(b.w), h:Math.round(b.h) };
         renderTable(); autosave();
       }
     };
@@ -2440,8 +2282,7 @@ function setupTableInteraction() {
     const now = Date.now();
     if (now - cursorThrottle > 60) {
       cursorThrottle = now;
-      if (ROLE === 'gm') broadcastCursor('gm', x, y);
-      else sendToGM({ type:'cursor', x, y });
+      if (!window.DEMO) sendToServer({ type:'cursor', x, y });
     }
     // Only extend the stroke while the left mouse button is still held.
     if (activeStroke && (e.buttons & 1)) {
@@ -2612,12 +2453,7 @@ function setupTableInteraction() {
 
 function finishStroke() {
   if (activeStroke && activeStroke.points.length > 1) {
-    if (ROLE === 'gm') {
-      STATE.table.drawings.push({ id: uid(), by:'gm', ...activeStroke });
-      broadcast({ type:'state' }); renderDrawings(); autosave();
-    } else {
-      sendToGM({ type:'draw-stroke', stroke: activeStroke });
-    }
+    sendOp({ type:'add-drawing', by: MY_ID, stroke: activeStroke });
   }
   activeStroke = null;
 }
@@ -2700,7 +2536,7 @@ function enterSpawnZoneMode() {
   panel.appendChild(el('span', { class:'sp-label' }, 'Spawn Zone'));
   panel.appendChild(el('span', { class:'sp-hint' }, 'Drag on the map to set where characters first appear · Esc to exit'));
   const clr = el('button', { class:'tool-btn' }, 'Clear zone');
-  clr.addEventListener('click', () => { delete boardById(STATE.gmViewBoardId).spawnZone; renderTable(); autosave(); });
+  clr.addEventListener('click', () => { delete boardById(gmViewBoardId).spawnZone; renderTable(); autosave(); });
   panel.appendChild(clr);
   const close = el('button', { class:'tool-btn', title:'Exit' });
   close.appendChild(icon('close'));
@@ -2716,7 +2552,7 @@ function renderSpawnZone() {
   if (ROLE !== 'gm') return;
   const tc = $('#tableContent'); if (!tc) return;
   let z = $('#spawnZone');
-  const zone = (STATE && STATE.boards) ? boardById(STATE.gmViewBoardId).spawnZone : null;
+  const zone = (STATE && STATE.boards) ? boardById(gmViewBoardId).spawnZone : null;
   if (!zone) { z?.remove(); return; }
   if (!z) { z = el('div', { id:'spawnZone' }); z.appendChild(el('span', {}, 'Spawn')); tc.appendChild(z); }
   z.style.left = zone.x + 'px'; z.style.top = zone.y + 'px'; z.style.width = zone.w + 'px'; z.style.height = zone.h + 'px';
@@ -2837,14 +2673,11 @@ async function stampAt(clientX, clientY) {
   const x = Math.round((clientX - cr.left) / tableZoom - stampSize / 2);
   const y = Math.round((clientY - cr.top)  / tableZoom - stampSize / 2);
   const tok = stampNextToken || pickStampToken(); if (!tok) return;
-  const dataUrl = await loadAssetAsDataUrl(tok.path); if (!dataUrl) return;
+  const raw = await loadAssetAsDataUrl(tok.path); if (!raw) return;
+  const dataUrl = await compressDataUrl(raw, 512, 0.85);   // share a small token, not the full-res file
   const hash = await hashBlob(dataUrl);
   ASSETS[hash] = dataUrl;
-  PATH_TO_HASH[tok.path] = hash;
-  if (ROLE === 'gm' && !STATE.assetMeta[hash]) {
-    STATE.assetMeta[hash] = { kind:'figurine', size:dataUrl.length, path:tok.path };
-    for (const c of Object.values(connections)) sendAsset(c, hash, dataUrl, 'figurine');
-  }
+  if (!activeState()?.assetMeta?.[hash]) sendAsset(hash, dataUrl, 'figurine', undefined, tok.path);
   sendOp({ type:'add-figurine', hash, x, y, w:stampSize, h:stampSize, label:tok.name });
   refreshStampPool();                          // new random pick for the next stamp + ghost
 }
@@ -2876,34 +2709,35 @@ async function uploadPfp(pid, file) {
   const hash = await hashBlob(dataUrl);
   ASSETS[hash] = dataUrl;
   await cacheAssetPut(hash, { kind:'pfp', dataUrl });
-  if (ROLE === 'gm') {
-    STATE.assetMeta[hash] = { kind:'pfp', size: dataUrl.length };
-    STATE.hands[pid].pfpHash = hash;
-    for (const c of Object.values(connections)) sendAsset(c, hash, dataUrl, 'pfp');
-    broadcast({ type:'state' }); renderAllGM(); autosave();
-  } else {
-    window._pendingPfp = dataUrl; window._pendingPfpHash = hash;
-    sendAsset(connections.gm, hash, dataUrl, 'pfp');
-    sendToGM({ type:'op', op:{ type:'set-pfp', owner:pid, hash }});
-  }
+  sendAsset(hash, dataUrl, 'pfp');                 // share via host
+  sendOp({ type:'set-pfp', owner: pid, hash });    // host updates the sheet + spawns the token
+}
+
+// Compress an already-loaded dataUrl (for sharing token-library / stamp art at a small size).
+async function compressDataUrl(dataUrl, maxDim, quality, mime='image/png') {
+  return await new Promise(res => {
+    const img = new Image();
+    img.onload = () => {
+      let w = img.width, h = img.height;
+      if (Math.max(w, h) > maxDim) { const r = maxDim / Math.max(w, h); w = Math.round(w*r); h = Math.round(h*r); }
+      const c = document.createElement('canvas'); c.width = w; c.height = h;
+      c.getContext('2d').drawImage(img, 0, 0, w, h);
+      try { res(c.toDataURL(mime, quality)); } catch { res(dataUrl); }
+    };
+    img.onerror = () => res(dataUrl);
+    img.src = dataUrl;
+  });
 }
 
 async function uploadFigurine(file, kind='figurine') {
   if (!file) return;
-  // Use PNG to preserve transparency for tokens; JPEG fine for maps where size matters.
-  const dataUrl = await compressImage(file, kind === 'map' ? 2048 : 1024, 0.9, kind === 'map' ? 'image/jpeg' : 'image/png');
+  // Keep shared images small — they travel over the GM's uplink. PNG keeps token transparency.
+  const dataUrl = await compressImage(file, kind === 'map' ? 1280 : 640, kind === 'map' ? 0.72 : 0.9, kind === 'map' ? 'image/jpeg' : 'image/png');
   const hash = await hashBlob(dataUrl);
   ASSETS[hash] = dataUrl;
   await cacheAssetPut(hash, { kind, dataUrl });
-  if (ROLE === 'gm') {
-    STATE.assetMeta[hash] = { kind, size: dataUrl.length };
-    for (const c of Object.values(connections)) sendAsset(c, hash, dataUrl, kind);
-    sendOp({ type:'add-figurine', hash, w: kind==='map'?600:120, h: kind==='map'?400:120, by: 'gm' });
-  } else {
-    // Player upload: ship the asset to the GM (who relays to other players), then ask GM to spawn the figurine.
-    sendAsset(connections.gm, hash, dataUrl, kind);
-    sendToGM({ type:'op', op:{ type:'add-figurine', hash, w: kind==='map'?600:120, h: kind==='map'?400:120, by: MY_ID }});
-  }
+  sendAsset(hash, dataUrl, kind);                  // share via host
+  sendOp({ type:'add-figurine', hash, w: kind==='map'?600:120, h: kind==='map'?400:120 });
 }
 
 // =================== Battlemap browser ===================
@@ -3021,9 +2855,12 @@ async function prefetchCardImages() {
 function gmSetupFlow() {
   // No auto-restore — the GM starts fresh and loads a saved session file if they want one.
   const pc = parseInt(prompt('Number of players (1-10)?', '4'), 10);
-  STATE = newState(Math.max(1, Math.min(10, pc || 4)));
-  setupPeerGM(STATE.roomCode);
+  MY_ID = 'gm';
+  STATE = ENGINE.newState(Math.max(1, Math.min(10, pc || 4)), CARD_IDS_BY_TYPE);
+  gmViewBoardId = STATE.activeBoardId;
+  STATE.table = boardById(STATE.activeBoardId).table;
   renderAllGM();
+  setupPeer(STATE.roomCode);   // empty room → host asks for init → we upload STATE
   setTimeout(prefetchCardImages, 1500); // start after initial render settles
 }
 
@@ -3049,7 +2886,7 @@ function playerJoinFlow() {
       window._pendingPfp = dataUrl; window._pendingPfpHash = hash;
     }
     overlay.remove();
-    setupPeerPlayer(MY_ROOM);
+    setupPeer(MY_ROOM);
   }}, 'Join');
   box.appendChild(field('Room code', '', true, v => roomI.value = v));
   box.appendChild(field('Your name', '', true, v => nameI.value = v));
@@ -3102,6 +2939,7 @@ async function boot() {
 // Activated only when window.DEMO is injected. No relay, no assets folder, no IndexedDB —
 // the board, tokens and cards are all embedded. Lets visitors try the app fully offline.
 let DEMO_CARD_IMAGES = {};
+let demoGame = null;   // DEMO: the local authoritative state the engine mutates
 function startDemo() {
   DEMO_CARD_IMAGES = window.DEMO.cardImages || {};
   ASSETS = window.DEMO.assets || {};
@@ -3111,15 +2949,10 @@ function startDemo() {
   setupFloatingPanels();
   setupAltPreview();
   setupKeybindHelp();
-  if (ROLE === 'gm') {
-    STATE = window.DEMO.state;
-    renderAllGM();
-  } else {
-    LOCAL_VIEW = window.DEMO.view;
-    MY_ID = window.DEMO.myId || 'player1';
-    MY_NAME = LOCAL_VIEW.hands?.[MY_ID]?.name || 'You';
-    renderAllPlayer();
-  }
+  demoGame = window.DEMO.state;                 // full authoritative state for both roles
+  MY_ID = ROLE === 'gm' ? 'gm' : (window.DEMO.myId || 'player1');
+  if (ROLE !== 'gm') MY_NAME = demoGame.hands?.[MY_ID]?.name || 'You';
+  projectDemo();
   const cs = $('#connStatus');
   if (cs) { cs.innerHTML = '<span class="net-dot" style="background:#10b981"></span>Demo (offline)'; cs.setAttribute('data-tooltip', 'Live preview — nothing is saved or shared. Fully local.'); }
   const rc = $('#roomCode'); if (rc) rc.textContent = 'DEMO';
@@ -3279,14 +3112,7 @@ function showDiscardPanel(deckType) {
 }
 function discardSend(deckType, idx, to) {
   if (ROLE !== 'gm') return;
-  const cardId = STATE.discards[deckType].splice(idx, 1)[0];
-  if (!cardId) return;
-  const card = { instId: uid(), cardId, faceUp: true };
-  if (to.where === 'table') STATE.table.cards.push({ ...card, x: 400, y: 300, rot: 0, z: nextZ() });
-  else if (to.where === 'deck') STATE.decks[deckType].push(cardId);
-  else if (to.where === 'hand') STATE.hands[to.owner].hand.push(card);
-  broadcast({ type:'state' }); renderAllGM(); autosave();
-  logEntry('GM', `moved ${CARDS_BY_ID[cardId].name} from ${deckType} discard`, 'sys');
+  sendOp({ type:'discard-send', deck: deckType, idx, to });
 }
 
 function setupDiceUI() {
@@ -3346,15 +3172,12 @@ function openTokenPanel() {
     const r = stage ? stage.getBoundingClientRect() : { width: 800, height: 600 };
     const cx = (r.width  / 2 - tablePanX) / tableZoom - 60;
     const cy = (r.height / 2 - tablePanY) / tableZoom - 60;
-    const dataUrl = await loadAssetAsDataUrl(t.path);
-    if (!dataUrl) return;
+    const raw = await loadAssetAsDataUrl(t.path);
+    if (!raw) return;
+    const dataUrl = await compressDataUrl(raw, 512, 0.85);   // share a small token, not the full-res file
     const hash = await hashBlob(dataUrl);
-    PATH_CACHE[t.path] = dataUrl;
     ASSETS[hash] = dataUrl;
-    if (ROLE === 'gm') {
-      STATE.assetMeta[hash] = { kind: 'figurine', size: dataUrl.length };
-      for (const c of Object.values(connections)) sendAsset(c, hash, dataUrl, 'figurine');
-    }
+    if (!activeState()?.assetMeta?.[hash]) sendAsset(hash, dataUrl, 'figurine', undefined, t.path);
     sendOp({ type: 'add-figurine', hash, w: 120, h: 120, label: t.name, x: Math.round(cx), y: Math.round(cy) });
   }
 
@@ -3655,9 +3478,11 @@ window._loadSession = file => loadSessionFile(file);
 window._newSession = () => {
   if (_dirty && !confirm('Start a new session? Unsaved changes will be lost.')) return;
   const pc = parseInt(prompt('Number of players (1-10)?', String(STATE.playerCount)), 10);
-  STATE = newState(Math.max(1, Math.min(10, pc || 4)));
-  if (wsConn) { wsConn.close(); wsConn = null; }
-  setupPeerGM(STATE.roomCode);
+  MY_ID = 'gm';
+  STATE = ENGINE.newState(Math.max(1, Math.min(10, pc || 4)), CARD_IDS_BY_TYPE);
+  gmViewBoardId = STATE.activeBoardId;
+  STATE.table = boardById(STATE.activeBoardId).table;
   renderAllGM();
-  _dirty = false;   // fresh empty session — nothing worth warning about yet
+  setupPeer(STATE.roomCode);   // new roomCode → fresh empty room
+  _dirty = false;
 };

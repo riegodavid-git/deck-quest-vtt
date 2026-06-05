@@ -83,6 +83,18 @@ function scanTokens() {
   return tokens;
 }
 
+// ── Engine inlining ──────────────────────────────────────────────────────────
+// The authoritative engine (engine.mjs) is shared with the Durable Object. For the
+// browser we strip its ES `export`s and wrap it in a namespaced IIFE so it never
+// clashes with shared.js's own globals; shared.js reaches it via `ENGINE.*`.
+function inlineEngine() {
+  const src = fs.readFileSync(path.join(ROOT, 'engine.mjs'), 'utf8').replace(/^export\s+/gm, '');
+  return '/* ===== ENGINE (inlined from engine.mjs) ===== */\nconst ENGINE = (function(){\n'
+    + src
+    + '\nreturn { newState, migrateState, normalizeZ, applyOp, viewFor, canApply, '
+    + 'ensureCharacterToken, ensureCharactersOnBoard, pickSpawnPoint, boardById, TABLE_OPS };\n})();\n';
+}
+
 // ── Main ──────────────────────────────────────────────────────────────────────
 function main() {
   // Cards
@@ -115,7 +127,7 @@ function main() {
   console.log(`Cards JSON:  ~${(cardsJson.length  / 1024).toFixed(1)} KB`);
   console.log(`Tokens JSON: ~${(tokensJson.length / 1024).toFixed(1)} KB`);
 
-  const shared   = fs.readFileSync(path.join(TEMPLATES, 'shared.js'), 'utf8');
+  const shared   = inlineEngine() + '\n' + fs.readFileSync(path.join(TEMPLATES, 'shared.js'), 'utf8');
   const fontsCss = loadFonts();
 
   if (!fs.existsSync(DIST)) fs.mkdirSync(DIST);
