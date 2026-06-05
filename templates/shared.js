@@ -570,7 +570,7 @@ function rollAndLog(spec) {
 // The game state lives in a per-room Durable Object (relay-cf/). Clients — GM and
 // players alike — send ops and render the view the host broadcasts. Connect to
 // RELAY_URL + '/r/<roomCode>'. Set RELAY_URL after `wrangler deploy` (relay-cf/).
-const RELAY_URL = 'wss://deck-quest-vtt.workers.dev';   // TODO: set to your wss://deck-quest-vtt.<subdomain>.workers.dev
+const RELAY_URL = 'wss://deck-quest-vtt.david-riego-01.workers.dev';
 
 let wsConn = null;
 let _netPingTimer = null;
