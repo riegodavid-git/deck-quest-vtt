@@ -1,0 +1,13 @@
+name = "deck-quest-vtt"
+main = "src/index.js"
+compatibility_date = "2026-06-01"
+
+# One Durable Object class — the authoritative per-room game host.
+[[durable_objects.bindings]]
+name = "ROOMS"
+class_name = "Room"
+
+# SQLite-backed Durable Objects are available on the FREE Workers plan.
+[[migrations]]
+tag = "v1"
+new_sqlite_classes = ["Room"]

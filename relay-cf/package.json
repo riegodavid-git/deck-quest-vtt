@@ -1,0 +1,12 @@
+{
+  "name": "deck-quest-relay-cf",
+  "private": true,
+  "description": "Authoritative WebSocket relay for Deck Quest VTT (Cloudflare Workers + Durable Objects)",
+  "scripts": {
+    "dev": "wrangler dev",
+    "deploy": "wrangler deploy"
+  },
+  "devDependencies": {
+    "wrangler": "^4"
+  }
+}
