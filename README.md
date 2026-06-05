@@ -231,9 +231,12 @@ templates/
   shared.js                       # entire game engine (~2 500 lines)
   gm.template.html                # GM client markup + CSS
   player.template.html            # Player client markup + CSS
-relay/
-  server.js                       # WebSocket relay (hosted on Render.com)
-  package.json
+engine.mjs                        # authoritative game engine — shared by the DO and the browser
+relay-cf/                         # Cloudflare Worker + Durable Object host (the live relay)
+  src/index.js                    #   Worker router + Room DO (WebSocket hibernation, SQLite)
+  wrangler.toml                   #   deploy config:  cd relay-cf && npx wrangler deploy
+relay/                            # legacy Render relay (retired; kept for reference)
+  server.js
 Deck Quest Open Source PNGs/      # card art + D&D token library
 dist/                             # built output (gitignored)
   gm.html
@@ -256,8 +259,8 @@ gh release create vX.Y.Z dist/gm.html dist/player.html --title "vX.Y.Z: …" --n
 
 | Layer | What |
 |---|---|
-| **Networking** | WebSocket relay server (`relay/server.js`) hosted on [Render.com](https://render.com) — pure message router, no game logic |
-| **State model** | GM is the authoritative host. All mutations are ops sent to the GM, applied, then broadcast as a filtered state snapshot to players. |
+| **Networking** | Cloudflare Worker + **Durable Object** (`relay-cf/`) — one DO per room, pinned to the APAC region, running on the free Workers plan |
+| **State model** | The Durable Object is the **authoritative host**: every op is validated (`canApply`) and applied server-side via the shared engine (`engine.mjs`), then a filtered view is broadcast to each client (the GM included). No single player's connection — not even the GM's — is in the critical path. |
 | **Asset transfer** | Uploaded maps/tokens/profile pics are chunked as base64 over WebSocket and cached in **IndexedDB** |
 | **Persistence** | **localStorage** autosaves the GM session on every state change. Manual save exports JSON. |
 | **Card/token data** | Embedded as `<script type="application/json">` tags in the HTML, parsed with `JSON.parse()` at boot for fast startup (~15–30 s vs 5–10 min for inline JS literals) |
