@@ -114,15 +114,19 @@ export class Room extends DurableObject {
       if (d.type === "asset-begin" && d.kind) this.assetKinds[d.hash] = d.kind;
       const targets = d.to ? [this.socketFor(d.to)] : this.sockets().filter(s => s !== ws);
       for (const s of targets) this.send(s, d);
-      if (d.type === "asset-end") {
+      if (d.type === "asset-end" && !d.to) {           // shared (broadcast) asset → track + announce
         this.game.assetMeta[d.hash] = { kind: this.assetKinds[d.hash] || d.kind || "figurine", path: d.path };
         await this.persist();
-        if (!d.to) this.broadcastState();              // new shared asset → let everyone learn the meta
+        this.broadcastState();                          // (targeted card art is pure relay — no meta, no broadcast)
       }
       return;
     }
     if (d.type === "asset-request") {                  // forward to the GM, who has it cached
       this.send(this.gmSocket(), { type: "asset-request", hash: d.hash, from: this.clientId(this.att(ws)) });
+      return;
+    }
+    if (d.type === "card-request") {                   // a player wants one card image — ask the GM
+      this.send(this.gmSocket(), { type: "card-request", path: d.path, from: this.clientId(this.att(ws)) });
       return;
     }
   }

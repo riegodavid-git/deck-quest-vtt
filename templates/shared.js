@@ -21,6 +21,8 @@ const NOUN = ['falcon','dragon','wolf','tiger','phoenix','kraken','griffin','vip
 const CARDS_BY_ID = {};
 const CARDS_BY_TYPE = { role:[], skill:[], item:[], location:[], adversary:[], info:[] };
 for (const c of CARDS) { CARDS_BY_ID[c.id] = c; CARDS_BY_TYPE[c.type].push(c); }
+// Deck source for the engine — arrays of card IDs (the engine works with ids, not card objects).
+const CARD_IDS_BY_TYPE = Object.fromEntries(Object.entries(CARDS_BY_TYPE).map(([t, a]) => [t, a.map(c => c.id)]));
 
 // Built-in token lookup — id → token object
 const TOKENS_BY_ID = {};
@@ -419,11 +421,12 @@ async function loadAssetAsDataUrl(relativePath) {
       // GM: register hash+path in assetMeta and push to connected players
       // so they can render cards/tokens received via state
       if (ROLE === 'gm' && !window.DEMO) {
+        // GM caches card art locally only. Players pull each card on demand
+        // (card-request) — never bulk-pushed — so the relay isn't flooded.
         try {
           const hash = await hashBlob(dataUrl);
           PATH_TO_HASH[relativePath] = hash;
           ASSETS[hash] = dataUrl;
-          if (!activeState()?.assetMeta?.[hash]) sendAsset(hash, dataUrl, 'asset', undefined, relativePath);
         } catch (_) {}
       }
     };
@@ -445,11 +448,21 @@ function loadCardImage(relativePath, imgEl) {
       imgEl.src = ASSETS[hash];
       imgEl.classList.remove('card-loading');
     } else {
-      // Shimmer until image arrives; rerenderAll() from handleAssetMessage
-      // will re-call loadCardImage, find the image, and clear the shimmer.
+      // Shimmer + ask the GM for just this one card. When it arrives,
+      // handleAssetMessage → rerenderAll re-calls loadCardImage and clears the shimmer.
       imgEl.classList.add('card-loading');
+      requestCardArt(relativePath);
     }
   }
+}
+// Player-side lazy card-art pull: request a single card image from the GM, deduped.
+const _cardArtReq = {};
+function requestCardArt(path) {
+  if (!path || ROLE === 'gm' || window.DEMO) return;
+  const t = Date.now();
+  if (_cardArtReq[path] && t - _cardArtReq[path] < 15000) return;   // one request per card per 15s
+  _cardArtReq[path] = t;
+  sendToServer({ type:'card-request', path });
 }
 
 // =================== State ===================
@@ -698,6 +711,13 @@ function handleFromServer(d) {
     case 'asset-request':  // the host forwarded a peer's request to us — send the bytes back to them
       if (ASSETS[d.hash]) sendAsset(d.hash, ASSETS[d.hash], (activeState()?.assetMeta?.[d.hash]?.kind) || 'figurine', d.from);
       return;
+    case 'card-request':   // a player needs a card image — load it from our folder, send only to them
+      if (ROLE === 'gm' && d.path) loadAssetAsDataUrl(d.path).then(async dataUrl => {
+        if (!dataUrl) return;
+        const hash = await hashBlob(dataUrl);
+        sendAsset(hash, dataUrl, 'card', d.from, d.path);
+      });
+      return;
   }
 }
 
@@ -707,11 +727,17 @@ const incomingAssets = {}; // hash -> { kind, parts:[], total }
 
 // Stream an asset to the host, which relays it to `to` (a clientId) or, if omitted,
 // to every other client. Clients cache locally; the host only tracks assetMeta.
-function sendAsset(hash, dataUrl, kind, to, path) {
+async function sendAsset(hash, dataUrl, kind, to, path) {
   if (!wsConn || wsConn.readyState !== WebSocket.OPEN) return;
   const total = Math.ceil(dataUrl.length / CHUNK_SIZE);
   wsConn.send(JSON.stringify({ type:'asset-begin', hash, kind, total, to, path }));
   for (let i=0;i<total;i++) {
+    // Backpressure: keep the socket's send buffer small so ops/pings/cursors stay
+    // responsive even while a big image is uploading (no head-of-line blocking).
+    while (wsConn.bufferedAmount > 64 * 1024) {
+      await new Promise(r => setTimeout(r, 15));
+      if (!wsConn || wsConn.readyState !== WebSocket.OPEN) return;
+    }
     wsConn.send(JSON.stringify({ type:'asset-chunk', hash, index:i, data: dataUrl.slice(i*CHUNK_SIZE, (i+1)*CHUNK_SIZE), to }));
   }
   wsConn.send(JSON.stringify({ type:'asset-end', hash, kind, to, path }));
@@ -1161,6 +1187,7 @@ function renderTableCards() {
   layer.innerHTML = '';
   for (const c of s.table.cards) {
     const card = CARDS_BY_ID[c.cardId];
+    if (!card) continue;   // unknown card id — skip rather than crash the whole render
     const div = el('div', { class:'placed-card' + (c.locked?' locked':'') + (selectionSet.has(c.instId)?' selected':'') + (c.groupId?' grouped':''), style:{ left:c.x+'px', top:c.y+'px', transform:`rotate(${c.rot||0}deg)`, zIndex:c.z||1 }, 'data-inst-id': c.instId });
     const cimg = el('img', { class:'card-img', draggable:'false' });
     cimg.style.background = 'var(--panel)';
@@ -2646,10 +2673,10 @@ async function stampAt(clientX, clientY) {
   const x = Math.round((clientX - cr.left) / tableZoom - stampSize / 2);
   const y = Math.round((clientY - cr.top)  / tableZoom - stampSize / 2);
   const tok = stampNextToken || pickStampToken(); if (!tok) return;
-  const dataUrl = await loadAssetAsDataUrl(tok.path); if (!dataUrl) return;
+  const raw = await loadAssetAsDataUrl(tok.path); if (!raw) return;
+  const dataUrl = await compressDataUrl(raw, 512, 0.85);   // share a small token, not the full-res file
   const hash = await hashBlob(dataUrl);
   ASSETS[hash] = dataUrl;
-  PATH_TO_HASH[tok.path] = hash;
   if (!activeState()?.assetMeta?.[hash]) sendAsset(hash, dataUrl, 'figurine', undefined, tok.path);
   sendOp({ type:'add-figurine', hash, x, y, w:stampSize, h:stampSize, label:tok.name });
   refreshStampPool();                          // new random pick for the next stamp + ghost
@@ -2686,10 +2713,26 @@ async function uploadPfp(pid, file) {
   sendOp({ type:'set-pfp', owner: pid, hash });    // host updates the sheet + spawns the token
 }
 
+// Compress an already-loaded dataUrl (for sharing token-library / stamp art at a small size).
+async function compressDataUrl(dataUrl, maxDim, quality, mime='image/png') {
+  return await new Promise(res => {
+    const img = new Image();
+    img.onload = () => {
+      let w = img.width, h = img.height;
+      if (Math.max(w, h) > maxDim) { const r = maxDim / Math.max(w, h); w = Math.round(w*r); h = Math.round(h*r); }
+      const c = document.createElement('canvas'); c.width = w; c.height = h;
+      c.getContext('2d').drawImage(img, 0, 0, w, h);
+      try { res(c.toDataURL(mime, quality)); } catch { res(dataUrl); }
+    };
+    img.onerror = () => res(dataUrl);
+    img.src = dataUrl;
+  });
+}
+
 async function uploadFigurine(file, kind='figurine') {
   if (!file) return;
-  // Use PNG to preserve transparency for tokens; JPEG fine for maps where size matters.
-  const dataUrl = await compressImage(file, kind === 'map' ? 2048 : 1024, 0.9, kind === 'map' ? 'image/jpeg' : 'image/png');
+  // Keep shared images small — they travel over the GM's uplink. PNG keeps token transparency.
+  const dataUrl = await compressImage(file, kind === 'map' ? 1280 : 640, kind === 'map' ? 0.72 : 0.9, kind === 'map' ? 'image/jpeg' : 'image/png');
   const hash = await hashBlob(dataUrl);
   ASSETS[hash] = dataUrl;
   await cacheAssetPut(hash, { kind, dataUrl });
@@ -2813,7 +2856,7 @@ function gmSetupFlow() {
   // No auto-restore — the GM starts fresh and loads a saved session file if they want one.
   const pc = parseInt(prompt('Number of players (1-10)?', '4'), 10);
   MY_ID = 'gm';
-  STATE = ENGINE.newState(Math.max(1, Math.min(10, pc || 4)), CARDS_BY_TYPE);
+  STATE = ENGINE.newState(Math.max(1, Math.min(10, pc || 4)), CARD_IDS_BY_TYPE);
   gmViewBoardId = STATE.activeBoardId;
   STATE.table = boardById(STATE.activeBoardId).table;
   renderAllGM();
@@ -3129,10 +3172,10 @@ function openTokenPanel() {
     const r = stage ? stage.getBoundingClientRect() : { width: 800, height: 600 };
     const cx = (r.width  / 2 - tablePanX) / tableZoom - 60;
     const cy = (r.height / 2 - tablePanY) / tableZoom - 60;
-    const dataUrl = await loadAssetAsDataUrl(t.path);
-    if (!dataUrl) return;
+    const raw = await loadAssetAsDataUrl(t.path);
+    if (!raw) return;
+    const dataUrl = await compressDataUrl(raw, 512, 0.85);   // share a small token, not the full-res file
     const hash = await hashBlob(dataUrl);
-    PATH_CACHE[t.path] = dataUrl;
     ASSETS[hash] = dataUrl;
     if (!activeState()?.assetMeta?.[hash]) sendAsset(hash, dataUrl, 'figurine', undefined, t.path);
     sendOp({ type: 'add-figurine', hash, w: 120, h: 120, label: t.name, x: Math.round(cx), y: Math.round(cy) });
@@ -3436,7 +3479,7 @@ window._newSession = () => {
   if (_dirty && !confirm('Start a new session? Unsaved changes will be lost.')) return;
   const pc = parseInt(prompt('Number of players (1-10)?', String(STATE.playerCount)), 10);
   MY_ID = 'gm';
-  STATE = ENGINE.newState(Math.max(1, Math.min(10, pc || 4)), CARDS_BY_TYPE);
+  STATE = ENGINE.newState(Math.max(1, Math.min(10, pc || 4)), CARD_IDS_BY_TYPE);
   gmViewBoardId = STATE.activeBoardId;
   STATE.table = boardById(STATE.activeBoardId).table;
   renderAllGM();
