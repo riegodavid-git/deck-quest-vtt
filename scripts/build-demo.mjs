@@ -125,7 +125,7 @@ function main() {
   function sheet(p, i) {
     return {
       name: p.name, pfpHash: 'tok' + i, color: PLAYER_COLORS[i],
-      stats: { str:10, agi:12, int:11, cha:9, sta:10 },
+      stats: { str:35, agi:25, int:20, cha:5, sta:15 },   // point-buy: sums to 100; mods +3/+1/+0/-3/-1
       hp: { current: 18, max: 22 }, armor: { current: 4, max: 10 },
       info: { class: p.cls, race: 'Human', age: '24', weight: '—' }, gold: 35,
       inventory: [{ id:'inv1', name:'Torch' }, { id:'inv2', name:'Rope' }],

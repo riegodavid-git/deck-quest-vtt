@@ -7,7 +7,12 @@
 const DECK_TYPES = ['role', 'skill', 'item', 'location', 'adversary'];
 const DECK_LABELS = { role: 'Roles', skill: 'Skills', item: 'Items', location: 'Locations', adversary: 'Adversaries' };
 const PLAYER_COLORS = ['#3b82f6','#ef4444','#10b981','#f59e0b','#a855f7','#ec4899','#14b8a6','#f97316','#6366f1','#84cc16'];
-const DEFAULT_STATS = { str:10, agi:10, int:10, cha:10, sta:10 };
+const DEFAULT_STATS = { str:20, agi:20, int:20, cha:20, sta:20 };
+const STAT_KEYS = ['str','agi','int','cha','sta'];
+const STAT_BASE = 20, STAT_MAX = 50, STAT_STEP = 5, STAT_BUDGET = 100;
+// Each 5 points above/below the baseline (20) is +1/-1 to the roll modifier.
+function statMod(v) { return Math.round(((v == null ? STAT_BASE : v) - STAT_BASE) / STAT_STEP); }
+function fmtMod(m) { return (m >= 0 ? '+' : '') + m; }
 const DEFAULT_HP = { current: 20, max: 20 };
 const DEFAULT_ARMOR = { current: 0, max: 10 };
 const ADJ = ['aqua','crimson','emerald','golden','silver','shadow','radiant','frost','ember','mystic'];
@@ -565,17 +570,25 @@ function renderLog() {
 }
 
 // =================== Dice ===================
+let _diceStatKey = null;   // null = no modifier; else 'str'|'agi'|'int'|'cha'|'sta'
 function rollAndLog(spec) {
   // spec like 'd20', 'd6', '2d6+3'
   const m = spec.match(/^(\d*)d(\d+)([+-]\d+)?$/i);
   if (!m) { logEntry(MY_NAME, 'Bad roll: '+spec, 'warn'); return; }
   const n = parseInt(m[1] || '1', 10);
   const sides = parseInt(m[2], 10);
-  const mod = parseInt(m[3] || '0', 10);
+  let mod = parseInt(m[3] || '0', 10);
+  // Optional stat modifier picked in the dice roller (the player's own sheet).
+  let statTxt = '';
+  if (_diceStatKey) {
+    const sm = statMod(activeState()?.hands?.[MY_ID]?.stats?.[_diceStatKey]);
+    mod += sm;
+    statTxt = ` (${_diceStatKey.toUpperCase()} ${fmtMod(sm)})`;
+  }
   const rolls = []; for (let i=0;i<n;i++) rolls.push(rollDie(sides));
   const sum = rolls.reduce((a,b)=>a+b,0) + mod;
   const detail = (n>1 ? `[${rolls.join(',')}]` : `${rolls[0]}`) + (mod ? (mod>0?` +${mod}`:` ${mod}`) : '');
-  const txt = `rolled ${spec} → ${detail} = ${sum}`;
+  const txt = `rolled ${spec}${statTxt} → ${detail} = ${sum}`;
   if (ROLE === 'gm') {
     STATE.log.push({ ts:Date.now(), who:MY_NAME, text:txt, kind:'roll', color:MY_COLOR });
     if (STATE.log.length>200) STATE.log.shift();
@@ -818,11 +831,8 @@ function handleFromPlayer(conn, data) {
       conn.send({ type:'join-rejected', reason:'No such slot.' });
       conn.close(); return;
     }
-    // Reject if slot is already held by a live player.
-    if (STATE.hands[slot].connected) {
-      conn.send({ type:'join-rejected', reason:`Slot already taken by ${STATE.hands[slot].name || slot}.` });
-      return;
-    }
+    // Slots aren't reserved — players coordinate among themselves. A join always
+    // (re)claims the slot, replacing whoever was previously there.
     connections[slot] = conn;
     conn._playerId = slot;
     STATE.hands[slot].name = data.name || ('Player ' + slot.slice(6));
@@ -832,12 +842,7 @@ function handleFromPlayer(conn, data) {
     // Auto-add a character token for this player on first join (if they have a pfp).
     if (STATE.hands[slot].pfpHash) ensureCharacterToken(slot);
     // send the new player their initial filtered view + ID
-    conn.send({ type:'state', view: viewFor(slot), myId: slot, takenSlots: Object.keys(connections).filter(s => connections[s]?.open) });
-    broadcastTakenSlots();
-    return;
-  }
-  if (data.type === 'request-taken-slots') {
-    conn.send({ type:'taken-slots', slots: Object.keys(connections).filter(s => connections[s]?.open) });
+    conn.send({ type:'state', view: viewFor(slot), myId: slot });
     return;
   }
   if (data.type === 'log') {
@@ -879,11 +884,6 @@ function handleFromGM(data) {
     location.reload();
     return;
   }
-  if (data.type === 'taken-slots') {
-    window._takenSlots = data.slots || [];
-    updateJoinSlotSelect();
-    return;
-  }
 }
 
 function ensureCharacterToken(playerId) {
@@ -902,20 +902,11 @@ function ensureCharacterToken(playerId) {
   });
 }
 
-function broadcastTakenSlots() {
-  if (ROLE !== 'gm') return;
-  const slots = Object.keys(connections).filter(s => connections[s]?.open);
-  for (const c of Object.values(connections)) {
-    if (c.open) c.send({ type:'taken-slots', slots });
-  }
-}
-
 function onPlayerDisconnect(conn) {
   const pid = conn._playerId; if (!pid) return;
   delete connections[pid];
   if (STATE.hands[pid]) { STATE.hands[pid].connected = false; logEntry(STATE.hands[pid].name || pid, 'disconnected', 'sys'); }
   broadcast({ type:'state' });
-  broadcastTakenSlots();
 }
 
 function broadcast(msg) {
@@ -962,6 +953,13 @@ function demoPlayerOp(op) {
     case 'remove-drawing':    s.table.drawings = tbl.drawings.filter(d => d.id !== op.id); break;
     case 'clear-my-drawings': s.table.drawings = tbl.drawings.filter(d => d.by !== MY_ID); break;
     case 'send-chat':         (s.chat = s.chat || []).push({ who: op.who, text: op.text, color: op.color, ts: op.ts }); break;
+    case 'set-player-field': {
+      const pl = s.hands[op.owner]; if (!pl) break;
+      const parts = op.path.split('.');           // e.g. 'stats.str', 'hp.current', 'name'
+      let o = pl; for (let i=0;i<parts.length-1;i++) o = o[parts[i]];
+      o[parts[parts.length-1]] = op.value;
+      break;
+    }
     default: return;
   }
   rerenderAll();
@@ -1388,7 +1386,8 @@ function renderFigurines() {
     let opacity = f.opacity != null ? f.opacity : 1;
     if (eff.invisible) opacity *= 0.35;
     const sx = f.flipH ? -1 : 1, sy = f.flipV ? -1 : 1;
-    const tf = `rotate(${f.rot||0}deg) scale(${sx},${sy})`;
+    // Rotate the whole token, but flip only the art (below) so the name/vitals stay readable.
+    const tf = `rotate(${f.rot||0}deg)`;
     const classes = 'figurine'
       + (f.locked ? ' locked' : '')
       + (isChar ? ' character' : '')
@@ -1399,7 +1398,7 @@ function renderFigurines() {
     const style = { left:f.x+'px', top:f.y+'px', width:f.w+'px', height:f.h+'px', transform:tf, zIndex:f.z||1, opacity };
     if (isChar) style.borderColor = ringColor;
     const div = el('div', { class:classes, style, 'data-inst-id': f.instId });
-    if (url) div.appendChild(el('img', { class:'figurine-img', src:url, draggable:'false' }));
+    if (url) div.appendChild(el('img', { class:'figurine-img', src:url, draggable:'false', style:{ transform:`scale(${sx},${sy})` } }));
     else div.appendChild(el('div', { class:'figurine-loading' }, isChar ? (charPlayer?.name || '?') : 'Loading...'));
     if (isChar) {
       const tag = el('div', { class:'character-nametag', style:{ background: ringColor } }, charPlayer?.name || f.playerId);
@@ -1640,12 +1639,8 @@ function playerPanel(pid, p, isSelfOrEditable) {
   vitalRow.appendChild(vitalBar('HP', p.hp, 'hp', '#ffb4a8', editable, pid));
   vitalRow.appendChild(vitalBar('Armor', p.armor, 'armor', '#c3cee5', editable, pid));
   body.appendChild(vitalRow);
-  // Stats
-  const statRow = el('div', { class:'stat-grid' });
-  for (const k of ['str','agi','int','cha','sta']) {
-    statRow.appendChild(field(k.toUpperCase(), p.stats[k], editable, v => sendOp({ type:'set-player-field', owner:pid, path:'stats.'+k, value:parseInt(v,10)||0 }), 'number', `${pid}.stats.${k}`));
-  }
-  body.appendChild(statRow);
+  // Stats — point-buy sliders (0–50, step 5) with a derived roll modifier and 100-pt cap.
+  body.appendChild(statBlock(pid, p, editable));
   // Gold
   body.appendChild(field('Gold', p.gold, editable, v => sendOp({ type:'set-player-field', owner:pid, path:'gold', value:parseInt(v,10)||0 }), 'number', `${pid}.gold`));
   // Notes
@@ -1682,6 +1677,55 @@ function playerPanel(pid, p, isSelfOrEditable) {
   body.appendChild(handDiv);
   panel.appendChild(body);
   return panel;
+}
+
+// Point-buy stat sheet: a "Points X/100" line + one row per stat (label, value+modifier,
+// and — when editable — a 0–50 step-5 slider). The slider clamps live so the 5 stats can
+// never sum above STAT_BUDGET; it commits (set-player-field) only on release.
+function statBlock(pid, p, editable) {
+  const wrap = el('div', { class:'stats-block' });
+  const sliders = {};
+  const sumOf = src => STAT_KEYS.reduce((a, k) => a + (parseInt(src(k), 10) || 0), 0);
+  const liveVal = k => sliders[k] ? sliders[k].value : (p.stats[k] == null ? STAT_BASE : p.stats[k]);
+
+  const pointsLine = el('div', { class:'stat-points' });
+  const refreshPoints = () => {
+    const t = sumOf(liveVal);
+    pointsLine.innerHTML = '';
+    pointsLine.appendChild(el('span', {}, 'Points'));
+    pointsLine.appendChild(el('span', { class:'stat-points-val' + (t >= STAT_BUDGET ? ' full' : '') }, `${t} / ${STAT_BUDGET}`));
+  };
+  wrap.appendChild(pointsLine);
+
+  const grid = el('div', { class:'stat-grid' });
+  for (const k of STAT_KEYS) {
+    const v = p.stats[k] == null ? STAT_BASE : p.stats[k];
+    const row = el('div', { class:'stat-row' });
+    row.appendChild(el('div', { class:'stat-row-label' }, k.toUpperCase()));
+    const valEl = el('div', { class:'stat-row-val' });
+    const renderVal = val => { valEl.innerHTML = ''; valEl.appendChild(el('span', { class:'stat-num' }, String(val))); valEl.appendChild(el('span', { class:'stat-mod' }, fmtMod(statMod(val)))); };
+    renderVal(v);
+    row.appendChild(valEl);
+    if (editable) {
+      const s = el('input', { type:'range', class:'stat-slider', min:'0', max:String(STAT_MAX), step:String(STAT_STEP), value:String(v) });
+      s.dataset.fieldKey = `${pid}.stats.${k}`;
+      sliders[k] = s;
+      s.addEventListener('input', () => {
+        let nv = parseInt(s.value, 10) || 0;
+        const others = STAT_KEYS.filter(x => x !== k).reduce((a, x) => a + (parseInt(liveVal(x), 10) || 0), 0);
+        if (nv + others > STAT_BUDGET) { nv = Math.max(0, Math.floor((STAT_BUDGET - others) / STAT_STEP) * STAT_STEP); s.value = String(nv); }
+        renderVal(nv); refreshPoints();
+      });
+      s.addEventListener('change', () => {
+        sendOp({ type:'set-player-field', owner:pid, path:'stats.'+k, value: parseInt(s.value, 10) || 0 });
+      });
+      row.appendChild(s);
+    }
+    grid.appendChild(row);
+  }
+  refreshPoints();
+  wrap.appendChild(grid);
+  return wrap;
 }
 
 function field(label, val, editable, onChange, type='text', key) {
@@ -2983,17 +3027,6 @@ function gmSetupFlow() {
   setTimeout(prefetchCardImages, 1500); // start after initial render settles
 }
 
-function updateJoinSlotSelect() {
-  const sel = $('#joinSlotSel'); if (!sel) return;
-  const taken = window._takenSlots || [];
-  for (const opt of sel.options) {
-    const isTaken = taken.includes(opt.value);
-    opt.disabled = isTaken;
-    const base = 'Slot ' + opt.value.slice(6);
-    opt.textContent = isTaken ? base + ' (taken)' : base;
-  }
-}
-
 function playerJoinFlow() {
   const overlay = el('div', { class:'join-overlay' });
   const box = el('div', { class:'join-box' });
@@ -3262,8 +3295,23 @@ function setupDiceUI() {
     row.appendChild(el('button', { class:'die-btn', onclick: () => rollAndLog('d'+d) }, 'd'+d));
   }
   const customI = el('input', { type:'text', placeholder:'2d6+3', style:{width:'70px'}});
-  customI.addEventListener('keydown', e => { if (e.key==='Enter' && customI.value) { rollAndLog(customI.value); customI.value=''; }});
+  // Strip stray whitespace so e.g. ' 1d20 + 6 ' still parses.
+  customI.addEventListener('keydown', e => {
+    if (e.key === 'Enter') {
+      const spec = customI.value.replace(/\s+/g, '');
+      if (spec) { rollAndLog(spec); customI.value=''; }
+    }
+  });
   row.appendChild(customI);
+  // Players can fold a stat modifier (from their own sheet) into a roll. The GM has no sheet.
+  if (ROLE === 'player') {
+    const sel = el('select', { class:'dice-stat-sel', title:'Add a stat modifier from your sheet' });
+    sel.appendChild(el('option', { value:'' }, 'No modifier'));
+    for (const k of STAT_KEYS) sel.appendChild(el('option', { value:k }, k.toUpperCase()));
+    sel.value = _diceStatKey || '';
+    sel.addEventListener('change', () => { _diceStatKey = sel.value || null; });
+    row.appendChild(sel);
+  }
 }
 
 // =================== Token panel ===================
