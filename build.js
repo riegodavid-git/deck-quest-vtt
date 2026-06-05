@@ -92,7 +92,7 @@ function inlineEngine() {
   return '/* ===== ENGINE (inlined from engine.mjs) ===== */\nconst ENGINE = (function(){\n'
     + src
     + '\nreturn { newState, migrateState, normalizeZ, applyOp, viewFor, canApply, '
-    + 'ensureCharacterToken, ensureCharactersOnBoard, pickSpawnPoint, boardById };\n})();\n';
+    + 'ensureCharacterToken, ensureCharactersOnBoard, pickSpawnPoint, boardById, TABLE_OPS };\n})();\n';
 }
 
 // ── Main ──────────────────────────────────────────────────────────────────────

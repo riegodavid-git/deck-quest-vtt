@@ -28,14 +28,14 @@ export const ADJ  = ['aqua','crimson','emerald','golden','silver','shadow','radi
 export const NOUN = ['falcon','dragon','wolf','tiger','phoenix','kraken','griffin','viper','raven','lynx'];
 
 // Table-scoped ops act on a board's table (cards/figurines/drawings).
-export const TABLE_OPS = new Set(['flip-card','move-table-card','lock-table-card','transfer-card',
-  'add-figurine','move-figurine','remove-figurine','duplicate-figurine','clear-drawings',
-  'clear-my-drawings','undo-drawing','add-drawing','remove-drawing','set-group',
+export const TABLE_OPS = new Set(['draw','spawn-card','discard-send','flip-card','move-table-card',
+  'lock-table-card','transfer-card','add-figurine','move-figurine','remove-figurine','duplicate-figurine',
+  'clear-drawings','clear-my-drawings','undo-drawing','add-drawing','remove-drawing','set-group',
   'set-figurine-vitals','toggle-effect','set-figurine-label']);
 
 // Ops only the GM may issue.
-export const GM_ONLY_OPS = new Set(['draw','shuffle-deck','lock-table-card','clear-drawings',
-  'set-gm-notes','board-add','board-rename','board-duplicate','board-delete','board-activate']);
+export const GM_ONLY_OPS = new Set(['draw','spawn-card','discard-send','shuffle-deck','lock-table-card',
+  'clear-drawings','set-gm-notes','board-add','board-rename','board-duplicate','board-delete','board-activate']);
 // Ops that edit a specific owner's sheet — a player may only target their own.
 export const OWNER_SCOPED_OPS = new Set(['set-player-field','add-inventory','remove-inventory','set-pfp']);
 
@@ -219,6 +219,24 @@ export function applyOp(state, op, by, ctx = {}) {
     }
     case 'shuffle-deck': { shuffle(state.decks[op.deck] || []); pushLog(state, 'GM', `shuffled ${op.deck}`, 'sys'); return {}; }
 
+    case 'spawn-card': {   // GM: move a specific card out of its deck to a hand or the table
+      const deck = state.decks[op.deck]; if (!deck) return { rejected: true };
+      const i = deck.indexOf(op.cardId); if (i >= 0) deck.splice(i, 1);
+      const inst = { instId: uid(), cardId: op.cardId, type: op.deck, faceUp: op.to === 'gm' || op.to === 'table' };
+      if (op.to === 'table') tbl.cards.push({ ...inst, x:400, y:300, rot:0, z:nextZ(state) });
+      else if (state.hands[op.to]) state.hands[op.to].hand.push(inst);
+      return {};
+    }
+    case 'discard-send': { // GM: move a card from a discard pile to table/deck/hand
+      const pile = state.discards[op.deck]; if (!pile) return { rejected: true };
+      const cardId = pile.splice(op.idx, 1)[0]; if (cardId == null) return { rejected: true };
+      if (op.to.where === 'table') tbl.cards.push({ instId: uid(), cardId, type: op.deck, faceUp: true, x:400, y:300, rot:0, z:nextZ(state) });
+      else if (op.to.where === 'deck') state.decks[op.deck].push(cardId);
+      else if (op.to.where === 'hand' && state.hands[op.to.owner]) state.hands[op.to.owner].hand.push({ instId: uid(), cardId, type: op.deck, faceUp: true });
+      pushLog(state, 'GM', `moved a ${op.deck} from discard`, 'sys');
+      return {};
+    }
+
     case 'flip-card': {
       const c = op.where === 'table' ? tbl.cards.find(c => c.instId === op.instId)
                                      : state.hands[op.owner]?.hand.find(c => c.instId === op.instId);
@@ -349,16 +367,16 @@ export function applyOp(state, op, by, ctx = {}) {
 // Players get a filtered view (GM hand hidden, decks→counts, live board only).
 // The GM gets the full picture (all boards/hands/decks-counts/gmNotes).
 export function viewFor(state, clientId) {
-  const decks = Object.fromEntries(Object.entries(state.decks).map(([k,v]) => [k, v.length]));
-  if (clientId === 'gm') {
+  if (clientId === 'gm') {                 // GM sees everything (full decks, all boards/hands, notes)
     return JSON.parse(JSON.stringify({
       roomCode: state.roomCode, playerCount: state.playerCount,
-      decks, discards: state.discards,
+      decks: state.decks, discards: state.discards,
       boards: state.boards, activeBoardId: state.activeBoardId,
       hands: state.hands, assetMeta: state.assetMeta,
       log: state.log, chat: state.chat || [], gmNotes: state.gmNotes,
     }));
   }
+  const decks = Object.fromEntries(Object.entries(state.decks).map(([k,v]) => [k, v.length]));
   const hands = {};
   for (const [pid, p] of Object.entries(state.hands)) { if (pid === 'gm') continue; hands[pid] = p; }
   return JSON.parse(JSON.stringify({

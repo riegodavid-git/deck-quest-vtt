@@ -89,7 +89,7 @@ const gmView = viewFor(s, 'gm');
 const pView  = viewFor(s, 'player1');
 ok(gmView.hands.gm && gmView.gmNotes === 'secret', 'viewFor(gm): includes GM hand + notes');
 ok(gmView.boards && gmView.boards.length === 2, 'viewFor(gm): includes all boards');
-ok(typeof gmView.decks.role === 'number', 'viewFor(gm): decks are counts');
+ok(Array.isArray(gmView.decks.role), 'viewFor(gm): decks are full arrays');
 ok(!pView.hands.gm, 'viewFor(player): GM hand hidden');
 ok(pView.gmNotes === undefined && pView.boards === undefined, 'viewFor(player): no gmNotes/boards');
 ok(pView.table && pView.table.figurines, 'viewFor(player): has live table');

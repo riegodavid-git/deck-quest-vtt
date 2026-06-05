@@ -115,7 +115,7 @@ export class Room extends DurableObject {
       const targets = d.to ? [this.socketFor(d.to)] : this.sockets().filter(s => s !== ws);
       for (const s of targets) this.send(s, d);
       if (d.type === "asset-end") {
-        this.game.assetMeta[d.hash] = { kind: this.assetKinds[d.hash] || "figurine" };
+        this.game.assetMeta[d.hash] = { kind: this.assetKinds[d.hash] || d.kind || "figurine", path: d.path };
         await this.persist();
         if (!d.to) this.broadcastState();              // new shared asset → let everyone learn the meta
       }
