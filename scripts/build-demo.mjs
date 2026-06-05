@@ -163,7 +163,10 @@ function main() {
   };
 
   // ── Emit the two HTML files ───────────────────────────────────────────────
-  const shared   = fs.readFileSync(path.join(TEMPLATES, 'shared.js'), 'utf8');
+  const engineSrc = fs.readFileSync(path.join(ROOT, 'engine.mjs'), 'utf8').replace(/^export\s+/gm, '');
+  const engineNs  = '/* ===== ENGINE (inlined) ===== */\nconst ENGINE = (function(){\n' + engineSrc
+    + '\nreturn { newState, migrateState, normalizeZ, applyOp, viewFor, canApply, ensureCharacterToken, ensureCharactersOnBoard, pickSpawnPoint, boardById };\n})();\n';
+  const shared   = engineNs + '\n' + fs.readFileSync(path.join(TEMPLATES, 'shared.js'), 'utf8');
   const fontsCss = loadFonts();
   const cardsJson = JSON.stringify(catalog);
   if (!fs.existsSync(DOCS)) fs.mkdirSync(DOCS);
