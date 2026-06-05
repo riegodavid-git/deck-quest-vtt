@@ -2353,6 +2353,7 @@ async function stampAt(clientX, clientY) {
   const dataUrl = await compressDataUrl(raw, 512, 0.85);   // share a small token, not the full-res file
   const hash = await hashBlob(dataUrl);
   ASSETS[hash] = dataUrl;
+  await cacheAssetPut(hash, { kind:'figurine', dataUrl });   // cache so the token survives a GM reload
   if (!activeState()?.assetMeta?.[hash]) sendAsset(hash, dataUrl, 'figurine', undefined, tok.path);
   sendOp({ type:'add-figurine', hash, x, y, w:stampSize, h:stampSize, label:tok.name });
   refreshStampPool();                          // new random pick for the next stamp + ghost
@@ -2866,6 +2867,7 @@ function openTokenPanel() {
     const dataUrl = await compressDataUrl(raw, 512, 0.85);   // share a small token, not the full-res file
     const hash = await hashBlob(dataUrl);
     ASSETS[hash] = dataUrl;
+    await cacheAssetPut(hash, { kind:'figurine', dataUrl });   // cache so the token survives a GM reload
     if (!activeState()?.assetMeta?.[hash]) sendAsset(hash, dataUrl, 'figurine', undefined, t.path);
     sendOp({ type: 'add-figurine', hash, w: 120, h: 120, label: t.name, x: Math.round(cx), y: Math.round(cy) });
   }

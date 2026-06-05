@@ -121,8 +121,8 @@ export class Room extends DurableObject {
       }
       return;
     }
-    if (d.type === "asset-request") {                  // forward to the GM, who has it cached
-      this.send(this.gmSocket(), { type: "asset-request", hash: d.hash, from: this.clientId(this.att(ws)) });
+    if (d.type === "asset-request") {                  // ask any peer that has it (GM or a player) to send it back
+      this.fanout({ type: "asset-request", hash: d.hash, from: this.clientId(this.att(ws)) }, ws);
       return;
     }
     if (d.type === "card-request") {                   // a player wants one card image — ask the GM
