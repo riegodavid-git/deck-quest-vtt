@@ -552,7 +552,6 @@ let cursorThrottle = 0;
 let gmViewBoardId = null;   // GM-only, client-local: which board the GM previews/edits
 
 // ── Reconnect + session persistence ──────────────────────────────────────────
-let _intentionalClose = false;     // suppress auto-reconnect for deliberate closes (New Session / re-connect)
 let _netReconnecting = false;
 let _reconnectTimer = null;
 let _reconnectDelay = 1000;
@@ -578,7 +577,8 @@ function scheduleReconnect() {
 function setupPeer(room) {
   MY_ROOM = room;
   if (_reconnectTimer) { clearTimeout(_reconnectTimer); _reconnectTimer = null; }
-  if (wsConn) { _intentionalClose = true; try { wsConn.close(); } catch {} }
+  // Detach the old socket's handlers so closing it (intentional re-connect / New Session) doesn't trigger reconnect.
+  if (wsConn) { wsConn.onopen = wsConn.onmessage = wsConn.onclose = wsConn.onerror = null; try { wsConn.close(); } catch {} }
   wsConn = new WebSocket(RELAY_URL + '/r/' + encodeURIComponent(room));
   wsConn.onopen = () => {
     _reconnectDelay = 1000; _netReconnecting = false;
@@ -595,8 +595,7 @@ function setupPeer(room) {
   wsConn.onmessage = e => { let d; try { d = JSON.parse(e.data); } catch { return; } handleFromServer(d); };
   wsConn.onclose = () => {
     clearInterval(_netPingTimer);
-    if (_intentionalClose) { _intentionalClose = false; updateNetStatus(false, null); return; }
-    _netReconnecting = true; updateNetStatus(false, null); scheduleReconnect();   // unexpected drop → keep trying
+    _netReconnecting = true; updateNetStatus(false, null); scheduleReconnect();   // any drop → keep retrying (host persists state)
   };
   wsConn.onerror = () => { updateNetStatus(false, null); };
 }
