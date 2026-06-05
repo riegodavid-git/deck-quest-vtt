@@ -132,8 +132,6 @@ function el(tag, attrs={}, ...children) {
 }
 function uid() { return Math.random().toString(36).slice(2, 10); }
 function shuffle(a) { for (let i=a.length-1;i>0;i--){const j=Math.floor(Math.random()*(i+1));[a[i],a[j]]=[a[j],a[i]];} return a; }
-let _zCounter = 1;
-function nextZ() { return ++_zCounter; }
 
 // =================== Pan / zoom ===================
 let tableZoom = 1.0;
@@ -144,44 +142,7 @@ function applyTableTransform() {
   const c = $('#tableContent');
   if (c) c.style.transform = `translate(${tablePanX}px,${tablePanY}px) scale(${tableZoom})`;
 }
-function migrateState(state) {
-  if (!state || !state.hands) return;
-  if (Array.isArray(state.hands.gm)) {
-    state.hands.gm = { name:'GM', color:'#3b82f6', hand: state.hands.gm };
-  } else if (state.hands.gm && !state.hands.gm.hand) {
-    state.hands.gm.hand = [];
-  }
-  if (!state.chat) state.chat = [];
-  if (state.gmNotes === undefined) state.gmNotes = '';
-  // Multiple boards: wrap a legacy single table into one 'Main' board.
-  if (!state.boards) {
-    const table = state.table || { cards: [], figurines: [], drawings: [] };
-    const b = { id: uid(), name: 'Main', table };
-    state.boards = [b];
-    state.activeBoardId = b.id;
-    state.gmViewBoardId = b.id;
-  }
-  if (!state.activeBoardId) state.activeBoardId = state.boards[0].id;
-  if (!state.gmViewBoardId) state.gmViewBoardId = state.activeBoardId;
-  // Re-point the live table reference at the GM-viewed board.
-  state.table = (state.boards.find(b => b.id === state.gmViewBoardId) || state.boards[0]).table;
-}
 function boardById(id) { return STATE.boards.find(b => b.id === id) || STATE.boards[0]; }
-function normalizeZ(state) {
-  // Re-sequence all card/figurine z values to small ints, preserving visual order.
-  if (!state) return;
-  const boards = state.boards || (state.table ? [{ table: state.table }] : []);
-  for (const b of boards) {
-    const items = [
-      ...b.table.cards.map(c => ({ obj: c })),
-      ...b.table.figurines.map(f => ({ obj: f })),
-    ];
-    items.sort((a,b) => (a.obj.z||0) - (b.obj.z||0));
-    let z = 0;
-    for (const { obj } of items) obj.z = ++z;
-  }
-  _zCounter = boards.reduce((m, b) => Math.max(m, b.table.cards.length + b.table.figurines.length), 0);
-}
 
 // ── Board management (GM only) ───────────────────────────────────────────────
 function gmSwitchView(id) {        // GM previews/edits a board locally; players unaffected
@@ -210,47 +171,6 @@ function deleteBoard(id) {
   if (!confirm('Delete this board?')) return;
   if (gmViewBoardId === id) gmSwitchView(STATE.boards[0].id);
   sendOp({ type:'board-delete', id });
-}
-// A spawn point inside a board's zone (scattered, non-overlapping) or near board center.
-function pickSpawnPoint(board, placed) {
-  const size = 80; // character token size
-  const zone = board.spawnZone;
-  const farEnough = (x, y) => placed.every(p => Math.hypot((x + size/2) - (p.x + p.w/2), (y + size/2) - (p.y + p.h/2)) > size * 0.9);
-  if (zone && zone.w > size && zone.h > size) {
-    for (let i = 0; i < 30; i++) {
-      const x = zone.x + Math.random() * (zone.w - size);
-      const y = zone.y + Math.random() * (zone.h - size);
-      if (farEnough(x, y)) return { x: Math.round(x), y: Math.round(y) };
-    }
-    return { x: Math.round(zone.x + Math.random() * (zone.w - size)), y: Math.round(zone.y + Math.random() * (zone.h - size)) };
-  }
-  // No zone → near the center of the current view, with a little scatter
-  const stage = $('#tableStage'); const r = stage ? stage.getBoundingClientRect() : { width: 1000, height: 700 };
-  const ccx = (r.width / 2 - tablePanX) / tableZoom, ccy = (r.height / 2 - tablePanY) / tableZoom;
-  for (let i = 0; i < 30; i++) {
-    const x = ccx - 120 + Math.random() * 240, y = ccy - 120 + Math.random() * 240;
-    if (farEnough(x, y)) return { x: Math.round(x - size/2), y: Math.round(y - size/2) };
-  }
-  return { x: Math.round(ccx), y: Math.round(ccy) };
-}
-// Ensure every connected player has a character token on the given board.
-// First entry → spawn at the board's zone/center; returning → keep last position. Chars go on top.
-function ensureCharactersOnBoard(boardId) {
-  const board = boardById(boardId); const tbl = board.table;
-  const placed = tbl.figurines.filter(f => f.kind === 'character');
-  for (const pid of Object.keys(connections)) {
-    if (pid === 'gm') continue;
-    if (!connections[pid]?.open) continue;
-    let ch = tbl.figurines.find(f => f.kind === 'character' && f.playerId === pid);
-    if (!ch) {
-      const pt = pickSpawnPoint(board, placed);
-      ch = { instId: uid(), kind:'character', playerId: pid, x: pt.x, y: pt.y, w: 80, h: 80,
-        rot: 0, z: nextZ(), opacity: 1, locked: false, flipH:false, flipV:false,
-        label: STATE.hands[pid]?.name || pid, effects: {} };
-      tbl.figurines.push(ch); placed.push(ch);
-    }
-    ch.z = nextZ(); // characters always on the top-most layer
-  }
 }
 function activateBoard(id) {        // make a board the live one players see
   sendOp({ type:'board-activate', id });   // host spawns characters, logs, and broadcasts
@@ -395,6 +315,40 @@ async function setupAssetsFolder() {
   }
   await showFolderPickerModal();
 }
+// Re-use the persisted assets-folder handle (re-granting permission) instead of re-picking.
+async function tryReuseAssetsFolder() {
+  if (ROLE !== 'gm' || !window.showDirectoryPicker) return false;
+  try {
+    const handle = await getAssetsHandle();
+    if (!handle) return false;
+    const opts = { mode: 'read' };
+    let perm = await handle.queryPermission(opts);
+    if (perm !== 'granted') perm = await handle.requestPermission(opts);   // needs the click gesture
+    if (perm !== 'granted') return false;
+    assetsRootHandle = handle;
+    return true;
+  } catch { return false; }
+}
+// GM "Resume your last game?" modal — resolves 'resume' (folder re-allowed) or 'new'.
+function showGmResumeModal(saved) {
+  return new Promise(resolve => {
+    const overlay = el('div', { class:'join-overlay' });
+    const box = el('div', { class:'join-box' });
+    box.appendChild(el('h2', {}, 'Welcome back, GM'));
+    box.appendChild(el('p', { style:{ color:'var(--muted)', fontSize:'13px', margin:'4px 0 14px' } },
+      `Resume your last game (room ${saved.room})? You'll re-allow your assets folder.`));
+    const resumeBtn = el('button', { class:'primary' }, 'Resume game');
+    resumeBtn.addEventListener('click', async () => {
+      overlay.remove();
+      if (!(await tryReuseAssetsFolder())) await setupAssetsFolder();   // permission lost → re-pick
+      resolve('resume');
+    });
+    const newBtn = el('button', { style:{ marginTop:'8px', background:'transparent', border:'1px solid var(--line)' } }, 'Start a new game instead');
+    newBtn.addEventListener('click', () => { overlay.remove(); resolve('new'); });
+    box.appendChild(resumeBtn); box.appendChild(newBtn);
+    overlay.appendChild(box); document.body.appendChild(overlay);
+  });
+}
 async function resolveAssetFile(relativePath) {
   if (!assetsRootHandle) return null;
   const parts = relativePath.replace(/\\/g, '/').split('/').filter(Boolean);
@@ -473,69 +427,6 @@ let MY_ID = null;       // 'gm' or 'player1'..'player10'
 let MY_NAME = 'GM';
 let MY_COLOR = '#3b82f6';
 let MY_ROOM = null;
-
-function newState(playerCount) {
-  const decks = {}; const discards = {};
-  for (const t of DECK_TYPES) {
-    decks[t] = shuffle(CARDS_BY_TYPE[t].map(c => c.id));
-    discards[t] = [];
-  }
-  const hands = { gm: { name: 'GM', color: '#3b82f6', hand: [] } };
-  for (let i=1; i<=playerCount; i++) {
-    hands['player'+i] = {
-      name: '',
-      pfpHash: null,
-      stats: { ...DEFAULT_STATS },
-      hp: { ...DEFAULT_HP },
-      armor: { ...DEFAULT_ARMOR },
-      info: { class: '', race: '', age: '', weight: '' },
-      gold: 0,
-      inventory: [],
-      notes: '',
-      hand: [],
-      connected: false,
-      color: PLAYER_COLORS[i-1],
-    };
-  }
-  const mainTable = { cards: [], figurines: [], drawings: [] };
-  const mainBoard = { id: uid(), name: 'Main', table: mainTable };
-  return {
-    roomCode: randomRoom(),
-    playerCount,
-    decks, discards,
-    boards: [mainBoard],
-    activeBoardId: mainBoard.id,   // which board players currently see
-    gmViewBoardId: mainBoard.id,   // which board the GM is viewing/editing (not sent to players)
-    table: mainTable,              // live reference to the GM-viewed board's table (keeps all s.table code working)
-    hands,
-    assetMeta: {},
-    log: [],
-    chat: [],
-    gmNotes: '',
-  };
-}
-
-function viewFor(playerId) {
-  // Strip GM hand; players see other players' face-down cards as just {faceUp:false}.
-  const s = STATE;
-  const view = JSON.parse(JSON.stringify({
-    roomCode: s.roomCode, playerCount: s.playerCount,
-    decks: Object.fromEntries(Object.entries(s.decks).map(([k,v])=>[k,v.length])),
-    discards: s.discards,
-    table: boardById(s.activeBoardId).table,   // players always see the LIVE board, not the GM's previewed one
-    hands: {},
-    assetMeta: s.assetMeta,
-    log: s.log,
-    chat: s.chat || [],
-  }));
-  for (const [pid, p] of Object.entries(s.hands)) {
-    if (pid === 'gm') continue; // never send GM hand to players
-    view.hands[pid] = { ...p };
-    // Player hands are fully visible to all players — no face-down hiding.
-    // (GM hand is still excluded entirely above.)
-  }
-  return view;
-}
 
 function activeState() { return ROLE === 'gm' ? STATE : LOCAL_VIEW; }
 
@@ -638,8 +529,9 @@ function updateNetStatus(online, ms) {
   const el = $('#connStatus'); if (!el) return;
   let dotColor, label, tip;
   if (!online) {
-    dotColor = '#ef4444'; label = 'Offline';
-    tip = 'Relay: Offline\nPing: —';
+    dotColor = _netReconnecting ? '#f59e0b' : '#ef4444';
+    label = _netReconnecting ? 'reconnecting…' : 'Offline';
+    tip = _netReconnecting ? 'Relay: reconnecting…' : 'Relay: Offline\nPing: —';
   } else if (ms == null) {
     dotColor = '#f59e0b'; label = '…';
     tip = 'Relay: Online\nPing: measuring…';
@@ -659,13 +551,37 @@ function updateNetStatus(online, ms) {
 let cursorThrottle = 0;
 let gmViewBoardId = null;   // GM-only, client-local: which board the GM previews/edits
 
+// ── Reconnect + session persistence ──────────────────────────────────────────
+let _intentionalClose = false;     // suppress auto-reconnect for deliberate closes (New Session / re-connect)
+let _netReconnecting = false;
+let _reconnectTimer = null;
+let _reconnectDelay = 1000;
+const SESSION_KEY = 'deckquest-session';
+function saveSession() {
+  if (window.DEMO || !MY_ROOM) return;
+  try {
+    const s = ROLE === 'gm' ? { role:'gm', room: MY_ROOM }
+                            : { role:'player', room: MY_ROOM, slot: MY_ID, name: MY_NAME };
+    localStorage.setItem(SESSION_KEY, JSON.stringify(s));
+  } catch {}
+}
+function loadSavedSession() { try { return JSON.parse(localStorage.getItem(SESSION_KEY) || 'null'); } catch { return null; } }
+function scheduleReconnect() {
+  if (_reconnectTimer || !MY_ROOM) return;
+  _reconnectTimer = setTimeout(() => { _reconnectTimer = null; setupPeer(MY_ROOM); }, _reconnectDelay);
+  _reconnectDelay = Math.min(Math.round(_reconnectDelay * 1.7), 10000);   // backoff, capped at 10s
+}
+
 // Connect to the authoritative host (Durable Object) for this room.
 // GM and players use the same path; the host decides what each may do.
+// Drops auto-reconnect (with backoff); the DO persists state so we resume seamlessly.
 function setupPeer(room) {
   MY_ROOM = room;
-  if (wsConn) { try { wsConn.close(); } catch {} }
+  if (_reconnectTimer) { clearTimeout(_reconnectTimer); _reconnectTimer = null; }
+  if (wsConn) { _intentionalClose = true; try { wsConn.close(); } catch {} }
   wsConn = new WebSocket(RELAY_URL + '/r/' + encodeURIComponent(room));
   wsConn.onopen = () => {
+    _reconnectDelay = 1000; _netReconnecting = false;
     if (ROLE === 'gm') {
       wsConn.send(JSON.stringify({ type:'register', role:'gm' }));
     } else {
@@ -673,10 +589,15 @@ function setupPeer(room) {
       if (window._pendingPfp) { sendAsset(window._pendingPfpHash, window._pendingPfp, 'pfp'); delete window._pendingPfp; }
     }
     const rc = $('#roomCode'); if (rc) rc.textContent = room;
+    saveSession();
     startNetMonitor();
   };
   wsConn.onmessage = e => { let d; try { d = JSON.parse(e.data); } catch { return; } handleFromServer(d); };
-  wsConn.onclose = () => { clearInterval(_netPingTimer); updateNetStatus(false, null); };
+  wsConn.onclose = () => {
+    clearInterval(_netPingTimer);
+    if (_intentionalClose) { _intentionalClose = false; updateNetStatus(false, null); return; }
+    _netReconnecting = true; updateNetStatus(false, null); scheduleReconnect();   // unexpected drop → keep trying
+  };
   wsConn.onerror = () => { updateNetStatus(false, null); };
 }
 function sendToServer(msg) { if (wsConn && wsConn.readyState === WebSocket.OPEN) wsConn.send(JSON.stringify(msg)); }
@@ -810,239 +731,6 @@ function projectDemo() {
   }
 }
 
-// =================== State operations (GM-applied) ===================
-// Ops that mutate the board table — for these, a player-originated op must target
-// the LIVE board (what players see), not the board the GM is currently previewing.
-const TABLE_OPS = new Set(['draw','flip-card','move-table-card','lock-table-card','transfer-card',
-  'add-figurine','move-figurine','remove-figurine','duplicate-figurine','clear-drawings',
-  'clear-my-drawings','undo-drawing','add-drawing','remove-drawing','set-group',
-  'set-figurine-vitals','toggle-effect','set-figurine-label']);
-function applyOp(op, by, silent) {
-  if (ROLE !== 'gm') return;
-  const s = STATE;
-  // Batch: apply each sub-op's mutation, then one broadcast + render + autosave.
-  if (op.type === 'batch') {
-    for (const sub of (op.ops || [])) applyOp(sub, by, true);
-    if (!silent) { broadcast({ type:'state' }); renderAllGM(); autosave(); }
-    return;
-  }
-  const prevTable = s.table;
-  if (by !== 'gm' && s.boards && TABLE_OPS.has(op.type)) s.table = boardById(s.activeBoardId).table;
-  try {
-  switch (op.type) {
-    case 'draw': {
-      const deck = s.decks[op.deck]; if (!deck || !deck.length) return;
-      const cardId = deck.shift();
-      const target = op.to || 'gm';
-      const inst = { instId: uid(), cardId, faceUp: target === 'gm' || target === by ? true : false };
-      if (target === 'table') { s.table.cards.push({ ...inst, x: 400, y: 300, rot:0, z:nextZ() }); }
-      else { s.hands[target].hand.push(inst); }
-      const targetName = target === 'gm' ? 'GM' : s.hands[target]?.name || target;
-      logEntry(by==='gm'?'GM':(s.hands[by]?.name||by), `drew ${op.deck} → ${targetName}`, 'sys');
-      break;
-    }
-    case 'shuffle-deck': {
-      shuffle(s.decks[op.deck]);
-      logEntry('GM', `shuffled ${op.deck}`, 'sys');
-      break;
-    }
-    case 'flip-card': {
-      // op.where: 'hand' | 'table', op.owner (for hand), op.instId
-      let c = null;
-      if (op.where === 'table') c = s.table.cards.find(c => c.instId === op.instId);
-      else c = s.hands[op.owner]?.hand.find(c => c.instId === op.instId);
-      if (!c) return;
-      if (op.where === 'table' && c.locked) return;   // locked table cards can't be flipped (unlock first)
-      c.faceUp = !c.faceUp;
-      break;
-    }
-    case 'move-table-card': {
-      const c = s.table.cards.find(c => c.instId === op.instId); if (!c) return;
-      if (c.locked) return;   // locked cards can't be moved (unlock first)
-      c.x = op.x; c.y = op.y; c.z = nextZ();
-      if (silent) break;   // batched: mutate only, caller broadcasts/renders once
-      // In-place update — no destroy/recreate flash
-      const domCard = document.querySelector(`[data-inst-id="${op.instId}"]`);
-      if (domCard) { domCard.style.left = c.x + 'px'; domCard.style.top = c.y + 'px'; domCard.style.zIndex = c.z; }
-      broadcastMovePatch({ kind:'card', instId:op.instId, x:c.x, y:c.y, z:c.z });
-      autosave();
-      return;
-    }
-    case 'lock-table-card': {
-      if (by !== 'gm') return;
-      const c = s.table.cards.find(c => c.instId === op.instId); if (!c) return;
-      c.locked = !c.locked;
-      break;
-    }
-    case 'transfer-card': {
-      // from {where:'hand'|'table', owner?, instId} → to {where, owner?}
-      let card = null;
-      if (op.from.where === 'table') {
-        const i = s.table.cards.findIndex(c => c.instId === op.from.instId);
-        if (i<0) return;
-        if (s.table.cards[i].locked && by !== 'gm') return;
-        card = s.table.cards.splice(i,1)[0];
-      } else {
-        const arr = s.hands[op.from.owner]?.hand; if (!arr) return;
-        const i = arr.findIndex(c => c.instId === op.from.instId);
-        if (i<0) return; card = arr.splice(i,1)[0];
-      }
-      if (op.to.where === 'discard') {
-        s.discards[CARDS_BY_ID[card.cardId].type].push(card.cardId);
-      } else if (op.to.where === 'deck') {
-        s.decks[CARDS_BY_ID[card.cardId].type].push(card.cardId);
-      } else if (op.to.where === 'table') {
-        s.table.cards.push({ ...card, x: op.to.x || 400, y: op.to.y || 300, rot: 0, z: nextZ() });
-      } else if (op.to.where === 'hand') {
-        const inst = { instId: card.instId, cardId: card.cardId, faceUp: op.to.faceUp ?? card.faceUp };
-        s.hands[op.to.owner].hand.push(inst);
-      }
-      break;
-    }
-    case 'set-player-field': {
-      const p = s.hands[op.owner]; if (!p) return;
-      // op.path like 'hp.current', 'stats.str', 'name', 'gold', 'info.class'
-      const parts = op.path.split('.');
-      let o = p; for (let i=0;i<parts.length-1;i++) o = o[parts[i]];
-      o[parts[parts.length-1]] = op.value;
-      break;
-    }
-    case 'set-pfp': {
-      const p = s.hands[op.owner]; if (!p) return;
-      p.pfpHash = op.hash;
-      ensureCharacterToken(op.owner);
-      break;
-    }
-    case 'toggle-effect': {
-      const f = s.table.figurines.find(f => f.instId === op.instId); if (!f || f.locked) return;
-      f.effects = f.effects || {};
-      f.effects[op.effect] = !f.effects[op.effect];
-      break;
-    }
-    case 'set-figurine-label': {
-      const f = s.table.figurines.find(f => f.instId === op.instId); if (!f || f.locked) return;
-      f.label = op.label;
-      break;
-    }
-    case 'add-inventory': {
-      s.hands[op.owner].inventory.push({ id: uid(), name: op.name });
-      break;
-    }
-    case 'remove-inventory': {
-      const p = s.hands[op.owner]; if (!p) return;
-      p.inventory = p.inventory.filter(i => i.id !== op.id);
-      break;
-    }
-    case 'add-figurine': {
-      s.table.figurines.push({ instId: uid(), assetHash: op.hash, x: op.x||300, y: op.y||300, w: op.w||200, h: op.h||200,
-        rot: op.rot||0, z: nextZ(), label: op.label || '',
-        opacity: op.opacity!=null?op.opacity:1, flipH: !!op.flipH, flipV: !!op.flipV, showName: !!op.showName });
-      break;
-    }
-    case 'move-figurine': {
-      const f = s.table.figurines.find(f => f.instId === op.instId); if (!f) return;
-      // Locked figurines accept only the lock toggle — no moving/editing until unlocked.
-      if (f.locked) { if (op.locked != null) f.locked = op.locked; break; }
-      if (op.x != null) f.x = op.x; if (op.y != null) f.y = op.y;
-      if (op.w != null) f.w = op.w; if (op.h != null) f.h = op.h;
-      if (op.rot != null) f.rot = op.rot;
-      if (op.locked != null) f.locked = op.locked;
-      if (op.opacity != null) f.opacity = op.opacity;
-      if (op.flipH != null) f.flipH = op.flipH;
-      if (op.flipV != null) f.flipV = op.flipV;
-      if (op.label != null) f.label = op.label;
-      if (op.showName != null) f.showName = op.showName;
-      if (op.bringToFront) f.z = nextZ();
-      else if (op.sendToBack) {
-        const minZ = Math.min(...s.table.figurines.map(g => g.z||1));
-        f.z = minZ - 1;
-      }
-      // Pure drag (x/y only) — update existing DOM element in-place, no destroy/recreate flash
-      const isDrag = op.x != null && op.y != null &&
-        op.w == null && op.h == null && op.rot == null && op.locked == null &&
-        op.opacity == null && op.flipH == null && op.flipV == null && op.label == null &&
-        !op.bringToFront && !op.sendToBack;
-      if (isDrag && !silent) {
-        const domFig = document.querySelector(`[data-inst-id="${op.instId}"]`);
-        if (domFig) { domFig.style.left = f.x + 'px'; domFig.style.top = f.y + 'px'; }
-        broadcastMovePatch({ kind:'figurine', instId:op.instId, x:f.x, y:f.y, z:f.z });
-        autosave();
-        return;
-      }
-      break;
-    }
-    case 'remove-figurine': {
-      s.table.figurines = s.table.figurines.filter(f => f.instId !== op.instId);
-      break;
-    }
-    case 'duplicate-figurine': {
-      const f = s.table.figurines.find(f => f.instId === op.instId); if (!f) return;
-      s.table.figurines.push({ ...f, instId: uid(), x: f.x + 30, y: f.y + 30, z: nextZ() });
-      break;
-    }
-    case 'clear-drawings': {
-      s.table.drawings = []; logEntry('GM', 'cleared drawings', 'sys'); break;
-    }
-    case 'clear-my-drawings': {
-      s.table.drawings = s.table.drawings.filter(d => d.by !== op.by); break;
-    }
-    case 'undo-drawing': {
-      for (let i=s.table.drawings.length-1; i>=0; i--) {
-        if (s.table.drawings[i].by === op.by) { s.table.drawings.splice(i,1); break; }
-      } break;
-    }
-    case 'add-drawing': {
-      s.table.drawings.push({ id: uid(), by: op.by, ...op.stroke }); break;
-    }
-    case 'remove-drawing': {
-      s.table.drawings = s.table.drawings.filter(d => d.id !== op.id);
-      break;
-    }
-    case 'set-group': {
-      const ids = op.instIds || [];
-      const gid = op.groupId || null;
-      for (const id of ids) {
-        const f = s.table.figurines.find(x => x.instId === id);
-        if (f) { if (gid) f.groupId = gid; else delete f.groupId; }
-        const c = s.table.cards.find(x => x.instId === id);
-        if (c) { if (gid) c.groupId = gid; else delete c.groupId; }
-      }
-      break;
-    }
-    case 'send-chat': {
-      if (!s.chat) s.chat = [];
-      s.chat.push({ who: op.who, text: op.text, color: op.color || 'var(--text)', ts: op.ts || Date.now() });
-      if (s.chat.length > 200) s.chat.splice(0, s.chat.length - 200);
-      if (silent) return;
-      // Don't rerenderAll for chat — just update the chat panel
-      broadcast({ type:'state' });
-      renderAllGM();
-      autosave();
-      return;
-    }
-    case 'set-figurine-vitals': {
-      const f = s.table.figurines.find(x => x.instId === op.instId); if (!f || f.locked) break;
-      if (op.hp  !== undefined) f.hp   = op.hp;
-      if (op.armor !== undefined) f.armor = op.armor;
-      break;
-    }
-    case 'set-gm-notes': {
-      s.gmNotes = op.text || '';
-      if (silent) return;
-      // GM notes are local — no broadcast needed, but we autosave
-      autosave();
-      return;
-    }
-  }
-  } finally {
-    s.table = prevTable;   // restore the GM-viewed board reference before any render
-  }
-  if (silent) return;
-  broadcast({ type:'state' });
-  renderAllGM();
-  autosave();
-}
-
 // =================== Save / load ===================
 // Serialize STATE without the duplicated top-level `table` reference (boards[] is the
 // source of truth; STATE.table is rebuilt from gmViewBoardId on load).
@@ -1082,17 +770,6 @@ function loadSessionFile(file) {
     _dirty = false;   // just loaded — matches the file on disk
   };
   r.readAsText(file);
-}
-function tryRestoreLast() {
-  const last = localStorage.getItem('deckquest-last-room');
-  if (!last) return false;
-  const raw = localStorage.getItem('deckquest-session-' + last);
-  if (!raw) return false;
-  try {
-    const snap = JSON.parse(raw);
-    STATE = snap.state; migrateState(STATE); normalizeZ(STATE); ASSETS = snap.assets || {};
-    return true;
-  } catch { return false; }
 }
 
 // =================== Rendering ===================
@@ -2864,7 +2541,7 @@ function gmSetupFlow() {
   setTimeout(prefetchCardImages, 1500); // start after initial render settles
 }
 
-function playerJoinFlow() {
+function playerJoinFlow(saved) {
   const overlay = el('div', { class:'join-overlay' });
   const box = el('div', { class:'join-box' });
   box.appendChild(el('h2', {}, 'Join Deck Quest'));
@@ -2899,6 +2576,12 @@ function playerJoinFlow() {
   box.appendChild(wrap('Slot', slotSel));
   box.appendChild(wrap('Profile pic (optional)', pfpI));
   box.appendChild(btn);
+  if (saved) {   // prefill from the last session so the player can one-click rejoin
+    roomI.value = saved.room || '';
+    nameI.value = saved.name || '';
+    if (saved.slot) slotSel.value = saved.slot;
+    btn.textContent = 'Rejoin';
+  }
   overlay.appendChild(box);
   document.body.appendChild(overlay);
 }
@@ -2927,11 +2610,18 @@ async function boot() {
   setupAltPreview();
   setupKeybindHelp();
   if (activeState()) renderTable();
+  const _saved = loadSavedSession();
   if (ROLE === 'gm') {
-    await setupAssetsFolder();
-    gmSetupFlow();
+    if (_saved && _saved.role === 'gm' && _saved.room && (await showGmResumeModal(_saved)) === 'resume') {
+      MY_ID = 'gm';
+      setupPeer(_saved.room);   // DO still holds the game → sends 'state'; GM adopts (no newState)
+      setTimeout(prefetchCardImages, 1500);
+    } else {
+      await setupAssetsFolder();
+      gmSetupFlow();
+    }
   } else {
-    playerJoinFlow();
+    playerJoinFlow(_saved && _saved.role === 'player' ? _saved : null);
   }
 }
 
