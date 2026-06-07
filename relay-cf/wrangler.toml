@@ -11,3 +11,8 @@ class_name = "Room"
 [[migrations]]
 tag = "v1"
 new_sqlite_classes = ["Room"]
+
+# Edge-hosted art (deck cards) — served from KV via GET /a/<path>.
+[[kv_namespaces]]
+binding = "ART"
+id = "dbce3faa690040009db3f10aef89f306"
