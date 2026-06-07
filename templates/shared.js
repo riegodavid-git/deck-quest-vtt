@@ -389,34 +389,16 @@ async function loadAssetAsDataUrl(relativePath) {
   });
 }
 
-// Render a card image on any element — GM loads from filesystem,
-// player uses hash-based ASSETS received via sendAsset from GM.
+// Card images are served from the edge (Worker + KV) at /a/<path> for GM and players alike —
+// no local folder, no relay. The browser caches them (immutable), so repeats are instant.
+function artUrl(p) { return RELAY_URL.replace(/^wss/, 'https') + '/a/' + String(p).split('/').map(encodeURIComponent).join('/'); }
 function loadCardImage(relativePath, imgEl) {
   if (!relativePath) return;
   if (window.DEMO) { const u = DEMO_CARD_IMAGES[relativePath]; if (u) { imgEl.src = u; imgEl.classList.remove('card-loading'); } return; }
-  if (ROLE === 'gm') {
-    loadAssetAsDataUrl(relativePath).then(url => { if (url) imgEl.src = url; });
-  } else {
-    const hash = PATH_TO_HASH[relativePath];
-    if (hash && ASSETS[hash]) {
-      imgEl.src = ASSETS[hash];
-      imgEl.classList.remove('card-loading');
-    } else {
-      // Shimmer + ask the GM for just this one card. When it arrives,
-      // handleAssetMessage → rerenderAll re-calls loadCardImage and clears the shimmer.
-      imgEl.classList.add('card-loading');
-      requestCardArt(relativePath);
-    }
-  }
-}
-// Player-side lazy card-art pull: request a single card image from the GM, deduped.
-const _cardArtReq = {};
-function requestCardArt(path) {
-  if (!path || ROLE === 'gm' || window.DEMO) return;
-  const t = Date.now();
-  if (_cardArtReq[path] && t - _cardArtReq[path] < 15000) return;   // one request per card per 15s
-  _cardArtReq[path] = t;
-  sendToServer({ type:'card-request', path });
+  imgEl.classList.add('card-loading');
+  imgEl.addEventListener('load',  () => imgEl.classList.remove('card-loading'), { once: true });
+  imgEl.addEventListener('error', () => imgEl.classList.remove('card-loading'), { once: true });
+  imgEl.src = artUrl(relativePath);
 }
 
 // =================== State ===================
@@ -630,13 +612,6 @@ function handleFromServer(d) {
     case 'asset-begin': case 'asset-chunk': case 'asset-end': handleAssetMessage(d); return;
     case 'asset-request':  // the host forwarded a peer's request to us — send the bytes back to them
       if (ASSETS[d.hash]) sendAsset(d.hash, ASSETS[d.hash], (activeState()?.assetMeta?.[d.hash]?.kind) || 'figurine', d.from);
-      return;
-    case 'card-request':   // a player needs a card image — load it from our folder, send only to them
-      if (ROLE === 'gm' && d.path) loadAssetAsDataUrl(d.path).then(async dataUrl => {
-        if (!dataUrl) return;
-        const hash = await hashBlob(dataUrl);
-        sendAsset(hash, dataUrl, 'card', d.from, d.path);
-      });
       return;
   }
 }

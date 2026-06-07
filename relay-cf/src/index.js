@@ -125,10 +125,6 @@ export class Room extends DurableObject {
       this.fanout({ type: "asset-request", hash: d.hash, from: this.clientId(this.att(ws)) }, ws);
       return;
     }
-    if (d.type === "card-request") {                   // a player wants one card image — ask the GM
-      this.send(this.gmSocket(), { type: "card-request", path: d.path, from: this.clientId(this.att(ws)) });
-      return;
-    }
   }
 
   async webSocketClose(ws) {
@@ -142,12 +138,36 @@ export class Room extends DurableObject {
   async webSocketError(ws) { try { await this.webSocketClose(ws); } catch {} }
 }
 
-// ── Worker: route each WS upgrade by room code to its Room DO (pinned APAC) ────
+// ── Edge-hosted art: GET /a/<path> serves from KV; PUT /a/<path> (secret) publishes ──
+async function serveArt(request, env, url) {
+  const key = decodeURIComponent(url.pathname.slice(3));   // strip leading "/a/"
+  if (!key) return new Response("Bad request", { status: 400 });
+  if (request.method === "GET") {
+    if (!env.ART) return new Response("No store", { status: 503 });
+    const { value, metadata } = await env.ART.getWithMetadata(key, "arrayBuffer");
+    if (!value) return new Response("Not found", { status: 404 });
+    return new Response(value, { headers: {
+      "Content-Type": (metadata && metadata.ct) || "image/png",
+      "Cache-Control": "public, max-age=31536000, immutable",
+      "Access-Control-Allow-Origin": "*",
+    }});
+  }
+  if (request.method === "PUT") {
+    if (request.headers.get("x-publish-secret") !== env.PUBLISH_SECRET) return new Response("Forbidden", { status: 403 });
+    const buf = await request.arrayBuffer();
+    await env.ART.put(key, buf, { metadata: { ct: request.headers.get("Content-Type") || "image/png" } });
+    return new Response("OK");
+  }
+  return new Response("Method not allowed", { status: 405 });
+}
+
+// ── Worker: serve art, else route each WS upgrade by room code to its Room DO (APAC) ──
 export default {
   async fetch(request, env) {
+    const url = new URL(request.url);
+    if (url.pathname.startsWith("/a/")) return serveArt(request, env, url);
     if (request.headers.get("Upgrade") !== "websocket")
       return new Response("Deck Quest relay OK\n");
-    const url = new URL(request.url);
     const room = decodeURIComponent(url.pathname.replace(/^\/r\//, "")) || "lobby";
     const stub = env.ROOMS.get(env.ROOMS.idFromName(room), { locationHint: "apac" });
     return stub.fetch(request);
