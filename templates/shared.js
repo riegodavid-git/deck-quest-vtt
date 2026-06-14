@@ -61,6 +61,7 @@ const KEYBIND_HELP = [
   { group:'Tools',                     keys:['1','2','3'],    label:'Pointer / Pen / Eraser',  role:'all' },
   { group:'Tools',                     keys:['T'],            label:'Token stamper',           role:'gm' },
   { group:'Tools',                     keys:['Space'],        label:'Hold to pan',             role:'all' },
+  { group:'Tools',                     keys:['Middle-drag'],  label:'Pan the camera',          role:'all' },
   { group:'Tools',                     keys:['W','A','S','D'],label:'Pan the camera',          role:'all' },
   { group:'Tools',                     keys:['←','↑','↓','→'],label:'Move character / selected token', role:'all' },
   { group:'Tools',                     keys:['Esc'],          label:'Exit tool / clear select',role:'all' },
@@ -2255,7 +2256,7 @@ function setupTableInteraction() {
   });
   window.addEventListener('blur', _stopArrows);
 
-  // Pan start
+  // Pan start — hold Space + left-drag.
   stage.addEventListener('mousedown', e => {
     if (spaceHeld && e.button === 0) {
       e.preventDefault();
@@ -2265,6 +2266,17 @@ function setupTableInteraction() {
       stage.style.cursor = 'grabbing';
     }
   });
+  // Middle-mouse-button drag pans anywhere — even over tokens. Capture phase +
+  // stopPropagation so it beats token-drag / lasso, and preventDefault kills the
+  // browser's middle-click autoscroll.
+  stage.addEventListener('mousedown', e => {
+    if (e.button !== 1) return;
+    e.preventDefault(); e.stopPropagation();
+    isPanning = true;
+    panStartX = e.clientX; panStartY = e.clientY;
+    panOriginX = tablePanX; panOriginY = tablePanY;
+    stage.style.cursor = 'grabbing';
+  }, true);
 
   // Token stamper — capture-phase so a click always stamps (never starts a drag/lasso).
   // Only stamp on the actual table surface, never on toolbar / floating panels
@@ -2374,12 +2386,10 @@ function setupTableInteraction() {
     eraseAt((e.clientX - r.left) / tableZoom, (e.clientY - r.top) / tableZoom);
   });
   window.addEventListener('mouseup', e => {
-    if (e.button === 0) {
-      finishStroke();
-      if (isPanning) {
-        isPanning = false;
-        stage.style.cursor = spaceHeld ? 'grab' : '';
-      }
+    if (e.button === 0) finishStroke();
+    if ((e.button === 0 || e.button === 1) && isPanning) {   // end Space-drag or middle-drag pan
+      isPanning = false;
+      stage.style.cursor = spaceHeld ? 'grab' : '';
     }
   });
   window.addEventListener('blur', () => { finishStroke(); spaceHeld = false; isPanning = false; });
