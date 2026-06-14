@@ -4,6 +4,42 @@ All notable changes to Deck Quest VTT. Newest first. Versions are GitHub release
 (`gm.html` / `player.html` are attached to each); the Cloudflare Worker in `relay-cf/`
 is redeployed whenever the host protocol changes.
 
+## v1.3.0 — Owlbear-inspired tactical & QoL features (2026-06-14)
+
+A large feature drop: 11 features sourced from an Owlbear Rodeo research audit, then gap-analyzed
+against v1.2.0. The Cloudflare Worker was redeployed in lockstep — the host protocol gained new ops
+and ephemeral message types (it stays backward-compatible with older clients).
+
+### Added
+- **Grid overlay + snap-to-grid** — optional per-board square/hex grid (cell size, color, opacity,
+  line style); snap on token drop, Ctrl bypasses; GM-authored, off by default.
+- **Measurement / ruler tool** (hold-free `M`) — drag to measure; reads in grid cells when a grid is
+  on (Euclidean / Chebyshev / Manhattan); visible to teammates live; transient (never persisted).
+- **AoE / spell-area templates** — place, aim, and resize cone / circle / line / cube overlays as
+  first-class table objects (move, recolor, lock, duplicate, delete).
+- **Initiative / turn-order tracker** — per-board combatant list with round counter, active-turn
+  highlight (mirrored onto the table token), sort, and add-from-token; GM-driven, players read-only.
+- **Fog of war** — GM paints fog (Fill) and reveals / re-hides regions (Cut / Hide brush + rectangle),
+  opaque to players and semi-transparent to the GM; per board, persisted; Undo / Clear.
+- **Token auras / emanations** — a colored radius ring (circle or square) that follows a token.
+- **Ping / laser-pointer** (hold `Q`) — a fading colored ping tagged with who pinged, plus an
+  off-screen edge arrow pointing toward pings outside your viewport.
+- **Hide / reveal token from players** — GM-only staging: a token invisible to players (ghosted for
+  the GM) until revealed; its existence never reaches the player view.
+- **Private whispers** — direct messages alongside public chat via a target selector, routed only to
+  the recipient / sender (and the GM for moderation), never broadcast or saved.
+- **Persistent named rooms + invite link** — name your room for a stable URL whose table persists
+  between sessions; New Session / Load keep the same room; "Copy invite" + `#room=` prefill.
+- **Drag-and-drop / paste image import** — drop or paste an image onto the table; a Map/Token picker
+  places it at the cursor.
+
+### Changed
+- Engine unit tests grew **80 → 247**.
+
+### Kept by design
+- The **open control model** is preserved; **fog**, **hide-token**, and **whisper** are deliberate
+  GM-scoped exceptions (server-enforced, never leaking to the player view).
+
 ## v1.2.0 — Dynamic slots, faster rendering & robustness (2026-06-14)
 
 A large reliability + performance pass driven by a full multi-agent audit of the codebase.

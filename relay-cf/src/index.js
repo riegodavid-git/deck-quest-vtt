@@ -100,6 +100,19 @@ export class Room extends DurableObject {
       return;
     }
 
+    if (d.type === "reset-room") {
+      // GM-only force-overwrite (New Session / Load): unlike init-state, this clobbers
+      // any persisted game so the room NAME stays stable while the table is re-seeded.
+      if (this.att(ws).role !== "gm") return;
+      this.game = migrateState(d.state);
+      for (const s of this.sockets()) {                // re-seat currently-connected players (same loop as init-state)
+        const aa = this.att(s);
+        if (aa.role === "player") { const id = this.markPresent(aa); if (id) s.serializeAttachment({ ...aa, slot: id }); }
+      }
+      await this.persist(); this.broadcastState();
+      return;
+    }
+
     if (!this.game) return;                            // everything below needs a game
 
     if (d.type === "op") {
@@ -110,6 +123,17 @@ export class Room extends DurableObject {
       if (!res || res.rejected) return;
       if (res.movePatch) { this.fanout({ type: "move-patch", ...res.movePatch }, ws); this.schedulePersist(); }
       else if (res.patch) { for (const s of this.sockets()) this.send(s, { type: "patch", patch: res.patch }); this.schedulePersist(); } // broadcast to ALL incl. actor; idempotent
+      else if (res.whisper) {
+        // Private whisper — targeted relay, NEVER persisted or broadcast. Delivered to
+        // the recipient AND echoed back to the sender (so they see their own outgoing
+        // message). The GM also gets a copy of any player↔player whisper (moderation).
+        const w = res.whisper;
+        const out = { type: "whisper", from: w.from, to: w.to, text: w.text, color: w.color, name: w.name, ts: w.ts };
+        const sockFor = (id) => id === "gm" ? this.gmSocket() : this.socketFor(id);  // socketFor('gm') is unreliable → use gmSocket()
+        const dests = new Set([ sockFor(w.to), sockFor(w.from) ]);
+        if (w.from !== "gm" && w.to !== "gm") dests.add(this.gmSocket());
+        for (const s of dests) if (s) this.send(s, out);
+      }
       else if (res.gmOnly) { const gm = this.gmSocket(); if (gm) this.sendStateTo(gm); await this.persist(); }
       else { await this.persist(); this.broadcastState(); }
       return;
@@ -123,6 +147,23 @@ export class Room extends DurableObject {
     if (d.type === "cursor") {
       const who = this.clientId(this.att(ws)); const p = this.game.hands[who] || {};
       this.fanout({ type: "cursor-update", who, x: d.x, y: d.y, color: p.color || "#fff", name: p.name || who, pfpHash: p.pfpHash }, ws);
+      return;
+    }
+
+    if (d.type === "ping") {                           // ephemeral laser-pointer marker (not persisted)
+      const who = this.clientId(this.att(ws)); const p = this.game.hands[who] || {};
+      this.fanout({ type: "ping-show", who, x: d.x, y: d.y, color: p.color || "#fff", name: p.name || who, pfpHash: p.pfpHash, boardId: d.boardId }, ws);
+      return;
+    }
+
+    if (d.type === "ruler") {                           // ephemeral measure-tool line (not persisted)
+      const who = this.clientId(this.att(ws)); const p = this.game.hands[who] || {};
+      this.fanout({ type: "ruler-show", who, ax: d.ax, ay: d.ay, bx: d.bx, by: d.by, metric: d.metric, color: p.color || "#fff", name: p.name || who, boardId: d.boardId }, ws);
+      return;
+    }
+    if (d.type === "ruler-clear") {                    // peer released the ruler → hide it everywhere
+      const who = this.clientId(this.att(ws));
+      this.fanout({ type: "ruler-hide", who }, ws);
       return;
     }
 

@@ -59,6 +59,8 @@ const KEYBIND_HELP = [
   { group:'Cards (hover a table card)',keys:['L'],            label:'Lock / unlock',           role:'gm' },
   { group:'Cards (hover a table card)',keys:['Del'],          label:'Discard',                 role:'gm' },
   { group:'Tools',                     keys:['1','2','3'],    label:'Pointer / Pen / Eraser',  role:'all' },
+  { group:'Tools',                     keys:['Q'],            label:'Hold to ping (laser pointer)', role:'all' },
+  { group:'Tools',                     keys:['M'],            label:'Measure / ruler (drag to measure)', role:'all' },
   { group:'Tools',                     keys:['T'],            label:'Token stamper',           role:'gm' },
   { group:'Tools',                     keys:['Space'],        label:'Hold to pan',             role:'all' },
   { group:'Tools',                     keys:['Middle-drag'],  label:'Pan the camera',          role:'all' },
@@ -97,6 +99,11 @@ const ICONS = {
   stamp:          '<svg viewBox="0 0 24 24"><path d="M9 3 L15 3 L14 10 L16 10 L16 14 L8 14 L8 10 L10 10 Z"/><path d="M4 18 L20 18 L20 21 L4 21 Z"/></svg>',
   help:           '<svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><path d="M9.2 9.2 A2.8 2.8 0 1 1 12 13 L12 15"/><circle cx="12" cy="18.5" r="0.6" fill="currentColor"/></svg>',
   zone:           '<svg viewBox="0 0 24 24"><rect x="3" y="3" width="18" height="18" rx="2" stroke-dasharray="3 3"/><circle cx="12" cy="12" r="3" fill="currentColor"/></svg>',
+  grid:           '<svg viewBox="0 0 24 24"><rect x="3" y="3" width="18" height="18" rx="1"/><path d="M3 9 L21 9 M3 15 L21 15 M9 3 L9 21 M15 3 L15 21"/></svg>',
+  ping:           '<svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="3" fill="currentColor"/><circle cx="12" cy="12" r="7"/><path d="M12 2 L12 4 M12 20 L12 22 M2 12 L4 12 M20 12 L22 12"/></svg>',
+  ruler:          '<svg viewBox="0 0 24 24"><rect x="2" y="7" width="20" height="10" rx="1" transform="rotate(-45 12 12)"/><path d="M8.5 8.5 L10 10 M11 6 L13 8 M13.5 3.5 L16 6 M6 11 L8 13 M3.5 13.5 L6 16"/></svg>',
+  aoe:            '<svg viewBox="0 0 24 24"><path d="M4 4 L20 9 L20 15 L4 20 Z"/><circle cx="4" cy="12" r="1.6" fill="currentColor"/></svg>',
+  fog:            '<svg viewBox="0 0 24 24"><path d="M7 18 A4 4 0 0 1 7 10 A5 5 0 0 1 17 9 A4 4 0 0 1 17 18 Z"/><path d="M4 21 L20 21"/></svg>',
 };
 
 function icon(name, opts) {
@@ -144,6 +151,7 @@ let panStartX = 0, panStartY = 0, panOriginX = 0, panOriginY = 0;
 function applyTableTransform() {
   const c = $('#tableContent');
   if (c) c.style.transform = `translate(${tablePanX}px,${tablePanY}px) scale(${tableZoom})`;
+  updatePingArrows();   // off-screen ping arrows live outside #tableContent — re-aim them on pan/zoom
 }
 function boardById(id) { return STATE.boards.find(b => b.id === id) || STATE.boards[0]; }
 
@@ -219,6 +227,40 @@ async function hashBlob(dataUrl) {
 }
 function randomRoom() {
   return ADJ[Math.floor(Math.random()*ADJ.length)] + '-' + NOUN[Math.floor(Math.random()*NOUN.length)] + '-' + Math.floor(Math.random()*100);
+}
+// Normalize a chosen room name to a URL-safe slug: lowercase, letters/digits/dashes,
+// collapse runs of other chars to single dashes, strip leading/trailing dashes.
+function slugifyRoom(s) {
+  return String(s || '').toLowerCase().trim()
+    .replace(/[^a-z0-9]+/g, '-')
+    .replace(/^-+|-+$/g, '');
+}
+// Read a room name from the launch URL: `#room=<name>` (hash, preferred — never hits
+// the Worker) or `?room=<name>`. Returns a normalized slug or '' if absent.
+function roomFromUrl() {
+  try {
+    const h = new URLSearchParams((location.hash || '').replace(/^#/, ''));
+    const q = new URLSearchParams(location.search || '');
+    return slugifyRoom(h.get('room') || q.get('room') || '');
+  } catch { return ''; }
+}
+// Lightweight transient toast (self-styled so it needs no template CSS).
+let _toastEl = null, _toastTimer = null;
+function toast(msg) {
+  if (!_toastEl) {
+    _toastEl = el('div', { style: {
+      position:'fixed', bottom:'18px', left:'50%', transform:'translateX(-50%)',
+      background:'rgba(20,20,24,.95)', color:'#fff', padding:'9px 16px', borderRadius:'8px',
+      font:'500 13px/1.3 system-ui, sans-serif', boxShadow:'0 6px 22px rgba(0,0,0,.6)',
+      zIndex:2147483647, pointerEvents:'none', maxWidth:'80vw', textAlign:'center', opacity:'0',
+      transition:'opacity .15s', border:'1px solid rgba(255,255,255,.12)'
+    }});
+    document.body.appendChild(_toastEl);
+  }
+  _toastEl.textContent = msg;
+  _toastEl.style.opacity = '1';
+  clearTimeout(_toastTimer);
+  _toastTimer = setTimeout(() => { if (_toastEl) _toastEl.style.opacity = '0'; }, 2400);
 }
 
 // =================== IndexedDB asset cache ===================
@@ -504,14 +546,17 @@ function reapplyPendingDrawings() {
   pendingDrawings = pendingDrawings.filter(p => (now - p.ts) < 15000 && !confirmed.has(p.cid));
   for (const p of pendingDrawings) tbl.drawings.push({ id: 'local-' + p.cid, by: MY_ID, ...p.stroke });
 }
+// Pick the table array a move-patch targets by its kind.
+function moveArrFor(tbl, kind) {
+  return kind === 'card' ? tbl.cards : kind === 'template' ? (tbl.templates || []) : tbl.figurines;
+}
 function applyMovePatch(p) {
   // GM editing a NON-viewed board: mutate that board's authoritative table object but
   // skip DOM (it isn't on screen). A missing boardId means "the active/visible board".
   if (ROLE === 'gm' && p.boardId && p.boardId !== gmViewBoardId) {
     const b = STATE && STATE.boards.find(x => x.id === p.boardId);
     if (b) {
-      const arr = p.kind === 'card' ? b.table.cards : b.table.figurines;
-      const obj = arr.find(o => o.instId === p.instId);
+      const obj = moveArrFor(b.table, p.kind).find(o => o.instId === p.instId);
       if (obj) { obj.x = p.x; obj.y = p.y; if (p.z != null) obj.z = p.z; }
     }
     clearPendingMove(p.instId);
@@ -520,12 +565,17 @@ function applyMovePatch(p) {
   // Otherwise the patch targets the visible table (GM viewed board, or the player's
   // only/active board) — mutate it and update the DOM.
   const tbl = tableOf(); if (!tbl) { clearPendingMove(p.instId); return; }
-  const arr = p.kind === 'card' ? tbl.cards : tbl.figurines;
-  const obj = arr.find(o => o.instId === p.instId);
+  const obj = moveArrFor(tbl, p.kind).find(o => o.instId === p.instId);
   if (obj) { obj.x = p.x; obj.y = p.y; if (p.z != null) obj.z = p.z; }
   clearPendingMove(p.instId);
   const dom = document.querySelector(`[data-inst-id="${p.instId}"]`);
-  if (dom) { dom.style.left = p.x + 'px'; dom.style.top = p.y + 'px'; if (p.z != null) dom.style.zIndex = p.z; }
+  if (!dom) return;
+  if (p.kind === 'template') {
+    // Templates are SVG <g> nodes positioned by a transform (origin + aim), not left/top.
+    dom.setAttribute('transform', `translate(${p.x},${p.y}) rotate(${obj ? (obj.rot||0) : 0})`);
+  } else {
+    dom.style.left = p.x + 'px'; dom.style.top = p.y + 'px'; if (p.z != null) dom.style.zIndex = p.z;
+  }
 }
 
 // After adopting a full authoritative view, drop pendingMoves the host has already
@@ -613,6 +663,36 @@ function applyPatch(p) {
       if (viewed) renderFigurines();
       return;
     }
+    case 'set-template': {
+      const t = (tbl.templates || []).find(x => x.instId === p.instId); if (!t) return;
+      // Idempotent: set each changed field to the broadcast value (mirror set-figurine-vitals).
+      if ('rot'    in p) t.rot    = p.rot;
+      if ('size'   in p) t.size   = p.size;
+      if ('width'  in p) t.width  = p.width;
+      if ('color'  in p) t.color  = p.color;
+      if ('locked' in p) t.locked = p.locked;
+      if (viewed) renderTemplates();
+      return;
+    }
+    case 'fog-set': {
+      // Replace the whole fog object (used by fog-fill). Idempotent — we just adopt
+      // the broadcast value. tbl is the board the patch targets (GM: p.boardId; player:
+      // their single visible table).
+      tbl.fog = p.fog || ENGINE.defaultFog();
+      if (viewed) renderFog();
+      return;
+    }
+    case 'fog-add': {
+      const shape = p.shape; if (!shape) return;
+      tbl.fog = tbl.fog || ENGINE.defaultFog();
+      if (tbl.fog.shapes.some(sh => sh.id === shape.id)) return;   // idempotent double-apply guard (by id)
+      // Drop the optimistic 'local-fog' placeholder (the actor's instant copy) before
+      // adopting the authoritative shape, so a cut never ends up applied twice.
+      tbl.fog.shapes = tbl.fog.shapes.filter(sh => sh.id !== 'local-fog');
+      tbl.fog.shapes.push(shape);
+      if (viewed) renderFog();
+      return;
+    }
   }
 }
 
@@ -650,6 +730,7 @@ function updateNetStatus(online, ms) {
   el.setAttribute('data-tooltip', tip);
 }
 let cursorThrottle = 0;
+let pingThrottle = 0;       // gate hold/laser ping streaming to ~60ms like the cursor send
 let gmViewBoardId = null;   // GM-only, client-local: which board the GM previews/edits
 
 // ── Reconnect + session persistence ──────────────────────────────────────────
@@ -690,6 +771,7 @@ function setupPeer(room) {
       if (window._pendingPfp) { sendAsset(window._pendingPfpHash, window._pendingPfp, 'pfp'); delete window._pendingPfp; }
     }
     const rc = $('#roomCode'); if (rc) rc.textContent = room;
+    if (ROLE === 'gm') addRecentCampaign(room);   // update quick-rejoin list on every (re)connect
     saveSession();
     startNetMonitor();
     _flushOnState = true;   // defer the queue flush until the host's first 'state' (room is confirmed inited)
@@ -766,6 +848,20 @@ function handleFromServer(d) {
     case 'move-patch': applyMovePatch(d); return;
     case 'patch': applyPatch(d.patch); return;
     case 'cursor-update': drawCursor(d.who, d.x, d.y, d.color, d.name, d.pfpHash); return;
+    case 'ping-show':
+      // Ignore pings meant for a board we aren't currently viewing (mirror applyMovePatch's
+      // GM guard). Players only ever see the live/active board, so — like applyMovePatch —
+      // they take no board check and just render onto their one visible table.
+      if (ROLE === 'gm' && d.boardId && d.boardId !== gmViewBoardId) return;
+      showPing(d.x, d.y, d.color, d.name, d.pfpHash);
+      return;
+    case 'ruler-show':
+      // Same board guard as ping: the GM ignores rulers for a board it isn't viewing.
+      if (ROLE === 'gm' && d.boardId && d.boardId !== gmViewBoardId) return;
+      showRuler(d.who, d.ax, d.ay, d.bx, d.by, d.metric, d.color, d.name);
+      return;
+    case 'ruler-hide': hideRuler(d.who); return;
+    case 'whisper': receiveWhisper(d); return;   // private message — append to local buffer, never to state.chat
     case 'asset-begin': case 'asset-chunk': case 'asset-end': handleAssetMessage(d); return;
     case 'asset-request':  // the host forwarded a peer's request to us — send the bytes back to them
       if (ASSETS[d.hash]) sendAsset(d.hash, ASSETS[d.hash], (activeState()?.assetMeta?.[d.hash]?.kind) || 'figurine', d.from);
@@ -860,6 +956,9 @@ function demoApply(op) {
   if (!demoGame) return;
   const res = ENGINE.applyOp(demoGame, op, ROLE === 'gm' ? 'gm' : MY_ID, { connected: demoConnected() });
   if (res && res.rejected) return;
+  // No second socket in the demo: echo a whisper straight into the local buffer (mirrors
+  // the host echoing the whisper back to the sender) so the panel doesn't look broken.
+  if (res && res.whisper) { receiveWhisper(res.whisper); return; }
   projectDemo();
 }
 function projectDemo() {
@@ -899,9 +998,10 @@ function loadSessionFile(file) {
   r.onload = async () => {
     const snap = JSON.parse(r.result);
     MY_ID = 'gm';
+    const room = MY_ROOM || STATE?.roomCode;   // load INTO the current named room by default so continuity holds
     STATE = ENGINE.migrateState(snap.state, id => CARDS_BY_ID[id]?.type);
     ENGINE.normalizeZ(STATE);
-    STATE.roomCode = randomRoom();   // load into a fresh room so the host adopts it cleanly
+    STATE.roomCode = room || randomRoom();   // keep the stable name; fall back to a fresh room only if none yet
     gmViewBoardId = STATE.activeBoardId;
     STATE.table = boardById(STATE.activeBoardId).table;
     ASSETS = snap.assets || {};
@@ -909,8 +1009,13 @@ function loadSessionFile(file) {
       const meta = STATE.assetMeta?.[hash] || { kind: 'figurine' };
       await cacheAssetPut(hash, { kind: meta.kind, dataUrl });
     }
+    // Clear optimistic/queued state so old strokes/ops don't bleed into the loaded table.
+    pendingDrawings.length = 0;
+    for (const k in pendingMoves) clearPendingMove(k);
+    _pendingOps.length = 0;
     renderAllGM();
-    setupPeer(STATE.roomCode);
+    // Already connected to the stable room → force the host to overwrite with the loaded state.
+    if (!sendToServer({ type:'reset-room', state: STATE })) setupPeer(STATE.roomCode);
     _dirty = false;   // just loaded — matches the file on disk
   };
   r.readAsText(file);
@@ -954,6 +1059,7 @@ function renderTopbarPlayer() {
 // touch changed attributes (no innerHTML='' rebuild → no image re-decode/flicker).
 const _cardNodes = new Map();   // instId -> div (with ._srcKey, ._locked)
 const _figNodes  = new Map();   // instId -> div (with ._sig, ._locked)
+const _tplNodes  = new Map();   // instId -> <g> (with ._sig, ._locked) — AoE templates
 
 // Toggle the 'selected' class on a single instId's node without a full re-render.
 function setSelected(instId, on) {
@@ -964,9 +1070,12 @@ function setSelected(instId, on) {
 function renderTable() {
   const s = activeState(); if (!s) return;
   renderDeckStacks();
+  renderGrid();
+  renderTemplates();
   renderTableCards();
   renderFigurines();
   renderDrawings();
+  renderFog();
   renderSpawnZone();
 }
 function renderDeckStacks() {
@@ -1103,6 +1212,17 @@ function buildFigInner(div, f, url, isChar, charPlayer, ringColor) {
   const eff = f.effects || {};
   const sx = f.flipH ? -1 : 1, sy = f.flipV ? -1 : 1;
   div.innerHTML = '';
+  if (f.aura && f.aura.radius > 0) {
+    const a = f.aura;
+    const d = a.radius * 2;
+    div.appendChild(el('div', { class:'figurine-aura', style:{
+      width: d+'px', height: d+'px',
+      left: (f.w/2 - a.radius)+'px', top: (f.h/2 - a.radius)+'px',
+      background: a.color || '#3b82f6',
+      borderRadius: a.shape === 'square' ? '0' : '50%',
+      opacity: a.opacity != null ? String(a.opacity) : '0.18',
+    }}));
+  }
   if (url) div.appendChild(el('img', { class:'figurine-img', src:url, draggable:'false', style:{ transform:`scale(${sx},${sy})` } }));
   else div.appendChild(el('div', { class:'figurine-loading' }, isChar ? (charPlayer?.name || f.playerId || '?') : 'Loading...'));
   if (isChar) {
@@ -1202,12 +1322,20 @@ function buildFigInner(div, f, url, isChar, charPlayer, ringColor) {
 
 // Cheap signature of everything buildFigInner depends on. If unchanged across a
 // render, we leave innerHTML alone (this is the flicker fix — img.src untouched).
-function figSig(f, url, isChar, charPlayer) {
+function figSig(f, url, isChar, charPlayer, isTurn) {
   const hp    = isChar ? charPlayer?.hp    : f.hp;
   const armor = isChar ? charPlayer?.armor : f.armor;
   return [url || '', f.opacity, f.rot, f.w, f.h, f.flipH, f.flipV,
     JSON.stringify(f.effects || {}), JSON.stringify(hp || null), JSON.stringify(armor || null),
-    f.showName, f.label, f.locked, isChar, charPlayer?.name, charPlayer?.color].join('|');
+    f.showName, f.label, f.locked, f.hidden, isChar, charPlayer?.name, charPlayer?.color,
+    JSON.stringify(f.aura || null), !!isTurn].join('|');
+}
+// instId of the figurine whose initiative row is currently active (null if none /
+// the active row is an ad-hoc combatant). Used to ring the on-turn token.
+function activeTurnInstId() {
+  const ini = activeState()?.table?.initiative;
+  const e = ini && ini.entries ? ini.entries[ini.active] : null;
+  return e ? (e.instId || null) : null;
 }
 
 function renderFigurines() {
@@ -1215,16 +1343,22 @@ function renderFigurines() {
   const s = activeState();
   const layer = $('#figurineLayer'); if (!layer) return;
   const present = new Set();
+  const turnInstId = activeTurnInstId();
   for (const f of s.table.figurines) {
     present.add(f.instId);
     const isChar = f.kind === 'character';
     const charPlayer = isChar ? s.hands[f.playerId] : null;
     const ringColor = isChar ? (charPlayer?.color || '#f2ca50') : null;
+    const isTurn = !!turnInstId && f.instId === turnInstId;
     const url = figurineUrl(f, isChar, charPlayer);
     const eff = f.effects || {};
     let opacity = f.opacity != null ? f.opacity : 1;
     if (eff.invisible) opacity *= 0.35;
-    const sig = figSig(f, url, isChar, charPlayer);
+    // GM-only staging: a hidden token never reaches players (filtered in viewFor),
+    // but the GM still sees it ghosted (dashed outline via .hidden-gm + reduced opacity).
+    const ghosted = ROLE === 'gm' && f.hidden;
+    if (ghosted) opacity *= 0.4;
+    const sig = figSig(f, url, isChar, charPlayer, isTurn);
 
     let div = _figNodes.get(f.instId);
     // Lock change rebinds drag/handles → replace node for fresh closures.
@@ -1264,11 +1398,242 @@ function renderFigurines() {
     div.classList.toggle('downed', !!eff.down);
     div.classList.toggle('selected', selectionSet.has(f.instId));
     div.classList.toggle('grouped', !!f.groupId);
+    div.classList.toggle('hidden-gm', ghosted);
+    div.classList.toggle('init-turn', isTurn);
   }
   // Remove nodes whose instId disappeared from the table.
   for (const [instId, node] of _figNodes) {
     if (!present.has(instId)) { node.remove(); _figNodes.delete(instId); }
   }
+}
+
+// =================== AoE / spell-area templates (cone, circle, line, cube) ===================
+// Free-placed, aimed, translucent area shapes. They live in board.table.templates and
+// render in #templateLayer (an SVG world-space layer below the tokens, above the grid).
+// Keyed/diffed like renderFigurines: a per-template <g> node, rebuilt only when its
+// tplSig() changes, repositioned cheaply every pass.
+const SVGNS = 'http://www.w3.org/2000/svg';
+const TPL_DEFAULT_PX_PER_CELL = 50;       // px per "cell" when no grid is enabled
+const TPL_CONE_SPREAD_DEG = 60;           // cone half-spread total angle (apex angle)
+function svgEl(tag, attrs = {}) {
+  const e = document.createElementNS(SVGNS, tag);
+  for (const [k, v] of Object.entries(attrs)) if (v != null) e.setAttribute(k, v);
+  return e;
+}
+// One "cell" → px. Grid enabled → its cellSize; otherwise a fixed default.
+function tplPxPerCell() {
+  const g = currentGrid();
+  return (g && g.enabled && g.cellSize) ? Math.max(20, g.cellSize) : TPL_DEFAULT_PX_PER_CELL;
+}
+// Build the shape primitive at the LOCAL origin (0,0), un-rotated. The parent <g> applies
+// translate(x,y) rotate(rot). Origin conventions: cone apex=origin opening toward 0° (+x);
+// circle center=origin; line starts at origin going +x; cube top-left corner=origin.
+// `size` = primary dimension in cells; `width` = line thickness in cells.
+function tplGeometry(shape, sizePx, widthPx) {
+  switch (shape) {
+    case 'circle':
+      return svgEl('circle', { cx: 0, cy: 0, r: sizePx });
+    case 'cone': {
+      // Isoceles triangle apex at origin, length=sizePx along +x, apex angle TPL_CONE_SPREAD_DEG.
+      const half = (TPL_CONE_SPREAD_DEG / 2) * Math.PI / 180;
+      const bx = sizePx, by1 = Math.tan(half) * sizePx, by2 = -by1;
+      return svgEl('polygon', { points: `0,0 ${bx},${by1.toFixed(2)} ${bx},${by2.toFixed(2)}` });
+    }
+    case 'line': {
+      // Rectangle from origin along +x: length=sizePx, thickness=widthPx (centered on the axis).
+      const h = Math.max(2, widthPx);
+      return svgEl('rect', { x: 0, y: -h / 2, width: sizePx, height: h });
+    }
+    case 'cube':
+    default:
+      // Square, top-left corner at origin, side=sizePx.
+      return svgEl('rect', { x: 0, y: 0, width: sizePx, height: sizePx });
+  }
+}
+// Where the size/rotate handles sit in LOCAL coords (before the <g> transform), so the
+// size handle tracks the shape's far edge and the rotate handle floats just past it.
+function tplHandleAnchors(shape, sizePx) {
+  switch (shape) {
+    case 'circle': return { size: { x: sizePx, y: 0 }, rotate: { x: sizePx + 18, y: 0 } };
+    case 'cube':   return { size: { x: sizePx, y: sizePx }, rotate: { x: sizePx + 18, y: -18 } };
+    default:       return { size: { x: sizePx, y: 0 }, rotate: { x: sizePx + 18, y: 0 } };  // cone/line: along +x axis
+  }
+}
+// Cheap signature — rebuild the <g>'s children only when one of these changes.
+function tplSig(t, pxPerCell) {
+  return [t.shape, t.size, t.width, t.color, t.locked, pxPerCell, ROLE].join('|');
+}
+function buildTplInner(g, t, pxPerCell) {
+  g.replaceChildren();
+  const sizePx = Math.max(8, (t.size || 1) * pxPerCell);
+  const widthPx = Math.max(1, (t.width || 1)) * pxPerCell;
+  const shapeEl = tplGeometry(t.shape, sizePx, widthPx);
+  shapeEl.setAttribute('class', 'tpl-shape' + (t.locked ? ' locked' : ''));
+  shapeEl.setAttribute('fill', t.color || '#3b82f6');
+  shapeEl.setAttribute('stroke', t.color || '#3b82f6');
+  // Drag the whole template by its body (unless locked).
+  if (!t.locked) makeTemplateDraggable(shapeEl, t.instId);
+  shapeEl.addEventListener('contextmenu', e => {
+    e.preventDefault(); e.stopPropagation();
+    const live = (activeState()?.table.templates || []).find(x => x.instId === t.instId) || t;
+    showTemplateContextMenu(live, e);
+  });
+  g.appendChild(shapeEl);
+  // Size + rotate handles (unlocked only) — mirror the figurine handle pattern.
+  if (!t.locked) {
+    const anchors = tplHandleAnchors(t.shape, sizePx);
+    const sizeH = svgEl('circle', { class:'tpl-handle tpl-size', cx: anchors.size.x, cy: anchors.size.y, r: 6 });
+    sizeH.addEventListener('mousedown', e => startTemplateResize(e, t.instId));
+    const rotLine = svgEl('line', { class:'tpl-rotate-arm', x1: anchors.size.x, y1: anchors.size.y, x2: anchors.rotate.x, y2: anchors.rotate.y, stroke: t.color || '#3b82f6', 'stroke-opacity':'0.6', 'stroke-width':'1.5' });
+    const rotH = svgEl('circle', { class:'tpl-handle tpl-rotate', cx: anchors.rotate.x, cy: anchors.rotate.y, r: 6 });
+    rotH.addEventListener('mousedown', e => startTemplateRotate(e, t.instId));
+    g.appendChild(rotLine); g.appendChild(sizeH); g.appendChild(rotH);
+  }
+}
+function renderTemplates() {
+  if (_isDragging) return;   // suppress full re-render mid-drag (mirror renderFigurines)
+  const s = activeState();
+  const layer = $('#templateLayer'); if (!layer) return;
+  const pxPerCell = tplPxPerCell();
+  const present = new Set();
+  // SVG stacks by document order (no per-node z-index), so iterate in z order and append
+  // in sequence — this is what makes bringToFront/sendToBack actually reorder overlaps.
+  const templates = [...((s && s.table && s.table.templates) || [])].sort((a, b) => (a.z || 0) - (b.z || 0));
+  for (const t of templates) {
+    present.add(t.instId);
+    const sig = tplSig(t, pxPerCell);
+    let g = _tplNodes.get(t.instId);
+    // Lock change rebinds drag/handles → replace the node for fresh closures.
+    if (g && g._locked !== !!t.locked) { g.remove(); _tplNodes.delete(t.instId); g = null; }
+    if (!g) {
+      g = svgEl('g', { 'data-inst-id': t.instId });
+      buildTplInner(g, t, pxPerCell);
+      g._locked = !!t.locked; g._sig = sig;
+      _tplNodes.set(t.instId, g);
+    } else if (g._sig !== sig) {
+      buildTplInner(g, t, pxPerCell);
+      g._sig = sig;
+    }
+    // Append in z order — moves an existing node to the end if it's already a child.
+    layer.appendChild(g);
+    // Position / aim — cheap every pass (never touches the children).
+    g.setAttribute('transform', `translate(${t.x||0},${t.y||0}) rotate(${t.rot||0})`);
+  }
+  for (const [instId, node] of _tplNodes) {
+    if (!present.has(instId)) { node.remove(); _tplNodes.delete(instId); }
+  }
+}
+
+// Drag a placed template by its body. Optimistic local move + move-template op (mirror
+// makeDraggable's figurine path, but in SVG transform space — no DOM left/top).
+function makeTemplateDraggable(shapeEl, instId) {
+  shapeEl.addEventListener('mousedown', e => {
+    if (e.button !== 0 || spaceHeld || currentTool !== 'pointer') return;
+    e.preventDefault(); e.stopPropagation();
+    const s = activeState(); if (!s) return;
+    const t0 = s.table.templates.find(x => x.instId === instId); if (!t0 || t0.locked) return;
+    const startX = e.clientX, startY = e.clientY;
+    const x0 = t0.x || 0, y0 = t0.y || 0;
+    let lastX = x0, lastY = y0;
+    _isDragging = true;
+    const g = _tplNodes.get(instId);
+    const onMove = ev => {
+      lastX = x0 + (ev.clientX - startX) / tableZoom;
+      lastY = y0 + (ev.clientY - startY) / tableZoom;
+      if (g) g.setAttribute('transform', `translate(${Math.round(lastX)},${Math.round(lastY)}) rotate(${t0.rot||0})`);
+    };
+    const onUp = () => {
+      window.removeEventListener('mousemove', onMove); window.removeEventListener('mouseup', onUp);
+      _isDragging = false;
+      const nx = Math.round(lastX), ny = Math.round(lastY);
+      const live = (activeState()?.table.templates || []).find(x => x.instId === instId);
+      if (live) { live.x = nx; live.y = ny; }   // optimistic: keep the new pos until the host echoes
+      sendOp({ type:'move-template', instId, x: nx, y: ny });
+    };
+    window.addEventListener('mousemove', onMove); window.addEventListener('mouseup', onUp);
+  });
+}
+// Drag the size handle → grow/shrink `size` (in cells). Live-updates the geometry locally,
+// commits via update-template on release.
+function startTemplateResize(e, instId) {
+  e.preventDefault(); e.stopPropagation();
+  const s = activeState(); if (!s) return;
+  const t = s.table.templates.find(x => x.instId === instId); if (!t || t.locked) return;
+  const tc = $('#tableContent'); const cr = tc.getBoundingClientRect();
+  const pxPerCell = tplPxPerCell();
+  const g = _tplNodes.get(instId);
+  let newSize = t.size;
+  const onMove = ev => {
+    const mx = (ev.clientX - cr.left) / tableZoom, my = (ev.clientY - cr.top) / tableZoom;
+    const distPx = Math.hypot(mx - (t.x||0), my - (t.y||0));   // origin→cursor distance
+    newSize = Math.max(0.5, Math.round((distPx / pxPerCell) * 2) / 2);   // snap to half-cells
+    if (g) buildTplInner(g, { ...t, size: newSize }, pxPerCell);
+  };
+  const onUp = () => {
+    window.removeEventListener('mousemove', onMove); window.removeEventListener('mouseup', onUp);
+    if (newSize !== t.size) { t.size = newSize; sendOp({ type:'update-template', instId, size: newSize }); }
+  };
+  window.addEventListener('mousemove', onMove); window.addEventListener('mouseup', onUp);
+}
+// Drag the rotate handle → set `rot` (deg). Shift snaps to 15°. Commits via update-template.
+function startTemplateRotate(e, instId) {
+  e.preventDefault(); e.stopPropagation();
+  const s = activeState(); if (!s) return;
+  const t = s.table.templates.find(x => x.instId === instId); if (!t || t.locked) return;
+  const tc = $('#tableContent'); const cr = tc.getBoundingClientRect();
+  const g = _tplNodes.get(instId);
+  let newRot = t.rot || 0;
+  const onMove = ev => {
+    const mx = (ev.clientX - cr.left) / tableZoom, my = (ev.clientY - cr.top) / tableZoom;
+    let deg = Math.atan2(my - (t.y||0), mx - (t.x||0)) * 180 / Math.PI;
+    if (ev.shiftKey) deg = Math.round(deg / 15) * 15;
+    newRot = Math.round(deg);
+    if (g) g.setAttribute('transform', `translate(${t.x||0},${t.y||0}) rotate(${newRot})`);
+  };
+  const onUp = () => {
+    window.removeEventListener('mousemove', onMove); window.removeEventListener('mouseup', onUp);
+    if (newRot !== (t.rot||0)) { t.rot = newRot; sendOp({ type:'update-template', instId, rot: newRot }); }
+  };
+  window.addEventListener('mousemove', onMove); window.addEventListener('mouseup', onUp);
+}
+
+// Right-click menu for a placed template — mirrors showFigurineContextMenu's pattern.
+const TPL_SHAPES = [['cone','▲ Cone'],['circle','● Circle'],['line','▬ Line'],['cube','■ Cube']];
+function showTemplateContextMenu(t, e) {
+  const items = [];
+  items.push({ label: `Template · ${t.shape}`, disabled: true });
+  items.push('-');
+  items.push({ label: t.locked ? '🔓 Unlock' : '🔒 Lock', action: () => sendOp({ type:'update-template', instId:t.instId, locked: !t.locked }) });
+  if (!t.locked) {
+    items.push('-');
+    items.push({ label:'Rotate +15°', action: () => sendOp({ type:'update-template', instId:t.instId, rot:(t.rot||0)+15 }) });
+    items.push({ label:'Rotate +45°', action: () => sendOp({ type:'update-template', instId:t.instId, rot:(t.rot||0)+45 }) });
+    items.push({ label:'Rotate exact…', action: () => { const v = prompt('Aim angle (degrees):', String(t.rot||0)); if (v != null) sendOp({ type:'update-template', instId:t.instId, rot: parseFloat(v)||0 }); } });
+    items.push({ label:'Resize… (cells)', action: () => { const v = prompt('Size in grid cells:', String(t.size)); if (v != null && !isNaN(parseFloat(v))) sendOp({ type:'update-template', instId:t.instId, size: Math.max(0.5, parseFloat(v)) }); } });
+    if (t.shape === 'line') items.push({ label:'Line width… (cells)', action: () => { const v = prompt('Line thickness in cells:', String(t.width||1)); if (v != null && !isNaN(parseFloat(v))) sendOp({ type:'update-template', instId:t.instId, width: Math.max(0.25, parseFloat(v)) }); } });
+    items.push({ label:'🎨 Recolor…', action: () => showTemplateColorPicker(t, e.clientX, e.clientY) });
+    items.push('-');
+    items.push({ label:'Duplicate', action: () => sendOp({ type:'add-template', shape:t.shape, x:(t.x||0)+30, y:(t.y||0)+30, rot:t.rot||0, size:t.size, width:t.width, color:t.color }) });
+  }
+  items.push('-');
+  items.push({ label:'🗑 Delete', action: () => sendOp({ type:'remove-template', instId:t.instId }) });
+  if (ROLE === 'gm') items.push({ label:'🗑 Clear all templates', action: () => { if (confirm('Clear ALL templates on this board?')) sendOp({ type:'clear-templates' }); } });
+  showMenu(items, e.clientX, e.clientY);
+}
+// Small color popup reusing the pen-style <input type=color>, committing via update-template.
+function showTemplateColorPicker(t, x, y) {
+  $$('.ctx-menu').forEach(m => m.remove());
+  const popup = el('div', { class:'ctx-menu', style:{ left:x+'px', top:y+'px', padding:'10px' }});
+  popup.appendChild(el('div', { style:{ fontSize:'11px', color:'#9bb1c9', marginBottom:'6px' }}, 'Template color'));
+  const colorI = el('input', { type:'color', value: t.color || '#3b82f6', style:{ width:'100%', height:'32px', cursor:'pointer' }});
+  colorI.addEventListener('change', () => { sendOp({ type:'update-template', instId:t.instId, color: colorI.value }); popup.remove(); });
+  popup.appendChild(colorI);
+  document.body.appendChild(popup);
+  const rect = popup.getBoundingClientRect();
+  if (rect.right > window.innerWidth)  popup.style.left = Math.max(0, window.innerWidth  - rect.width  - 4) + 'px';
+  if (rect.bottom > window.innerHeight) popup.style.top = Math.max(0, window.innerHeight - rect.height - 4) + 'px';
+  const onAway = ev => { if (!popup.contains(ev.target)) { popup.remove(); document.removeEventListener('mousedown', onAway, true); } };
+  document.addEventListener('mousedown', onAway, true);
 }
 
 // Stroke a single drawing onto an arbitrary canvas context. Factored out so both
@@ -1300,6 +1665,123 @@ function renderDrawings() {
   for (const d of s.table.drawings) paintStroke(d, ctx);
 }
 
+// ---- Fog of war (per-board, GM-authored) ----
+// The fog GEOMETRY is vector shapes (not a pixel mask): we fill the whole 4000×3000
+// canvas with fog, then replay shapes IN ORDER — a `reveal` carves fog away with
+// destination-out compositing, a `hide` paints fog back with source-over. Read the fog
+// for the table currently on screen (GM: the previewed board via STATE.table; player:
+// their single LOCAL_VIEW.table — both reached through activeState().table, exactly like
+// renderDrawings). The canvas opacity is the ONLY per-role difference: GM 0.5 (sees
+// through to author), players 1.0 (opaque). NOTE: fog is presentation-layer concealment,
+// not secrecy — the geometry reaches the player's client (it must, to render the opaque
+// fog), so a player reading the socket could derive the hidden outline. This mirrors
+// drawings / face-down cards and is acceptable for a manual-reveal GM tool.
+const FOG_COLOR = '#0b0f1a';   // near-opaque dark "unexplored" fog
+function paintFogShape(ctx, shape) {
+  if (shape.kind === 'rect' && shape.rect) {
+    const { x, y, w, h } = shape.rect;
+    ctx.fillRect(x, y, w, h);
+  } else if (shape.points && shape.points.length) {
+    // Brush = a thick stroked polyline along the captured points (round caps/joins so
+    // a single click still carves a dot of the brush width).
+    ctx.lineCap = 'round'; ctx.lineJoin = 'round';
+    ctx.lineWidth = shape.width || 80;
+    ctx.beginPath();
+    for (let i = 0; i < shape.points.length; i++) {
+      const [x, y] = shape.points[i];
+      if (i === 0) ctx.moveTo(x, y); else ctx.lineTo(x, y);
+    }
+    if (shape.points.length === 1) { const [x, y] = shape.points[0]; ctx.lineTo(x + 0.01, y); }
+    ctx.stroke();
+  }
+}
+function renderFog() {
+  const s = activeState();
+  const canvas = $('#fogLayer'); if (!canvas) return;
+  const ctx = syncCanvasSize(canvas);
+  ctx.clearRect(0, 0, canvas.width, canvas.height);
+  ctx.globalCompositeOperation = 'source-over';
+  const fog = s && s.table ? s.table.fog : null;
+  const shapes = fog && fog.shapes ? fog.shapes : [];
+  if (!fog || (!fog.filled && !shapes.length)) {
+    canvas.style.opacity = '0';   // nothing to show
+    return;
+  }
+  // Base fog: cover the whole board if `filled`; otherwise start clear (hide shapes paint in).
+  ctx.fillStyle = FOG_COLOR;
+  if (fog.filled) ctx.fillRect(0, 0, canvas.width, canvas.height);
+  // Replay shapes IN ORDER so cut-then-re-hide composes correctly.
+  for (const shape of shapes) {
+    if (shape.mode === 'reveal') {
+      ctx.globalCompositeOperation = 'destination-out';   // carve fog away
+      ctx.strokeStyle = ctx.fillStyle = '#000';
+    } else {
+      ctx.globalCompositeOperation = 'source-over';       // paint fog back
+      ctx.strokeStyle = ctx.fillStyle = FOG_COLOR;
+    }
+    paintFogShape(ctx, shape);
+  }
+  ctx.globalCompositeOperation = 'source-over';
+  // The single GM-sees-through vs player-opaque switch.
+  canvas.style.opacity = ROLE === 'gm' ? '0.5' : '1';
+}
+
+// ---- Grid overlay (per-board, GM-authored) ----
+// Read the grid config for the table currently on screen: the GM's previewed board
+// carries it directly; the player view carries the active board's grid as a sibling
+// field (projected in engine viewFor) since the player view has no boards[].
+function currentGrid() {
+  if (ROLE === 'gm') {
+    if (!STATE || !STATE.boards) return null;
+    return boardById(gmViewBoardId).grid || null;
+  }
+  return LOCAL_VIEW ? (LOCAL_VIEW.grid || null) : null;
+}
+// Repaint the grid onto #gridLayer (world coords, below tokens). Like renderDrawings,
+// this runs only on state/patch adoption + config change — the CSS transform on
+// #tableContent handles pan/zoom, so we never repaint per frame.
+function renderGrid() {
+  const canvas = $('#gridLayer'); if (!canvas) return;
+  const ctx = syncCanvasSize(canvas);
+  ctx.clearRect(0, 0, canvas.width, canvas.height);
+  const g = currentGrid();
+  if (!g || !g.enabled) return;
+  const W = canvas.width, H = canvas.height;
+  const cell = Math.max(20, g.cellSize || 50);
+  const offX = ((g.offsetX || 0) % cell + cell) % cell;
+  const offY = ((g.offsetY || 0) % cell + cell) % cell;
+  ctx.save();
+  ctx.globalAlpha = g.opacity != null ? g.opacity : 0.25;
+  ctx.strokeStyle = g.color || '#ffffff';
+  ctx.lineWidth = 1;
+  ctx.setLineDash(g.lineStyle === 'dashed' ? [6, 6] : []);
+  ctx.beginPath();
+  if (g.type === 'hex') {
+    // Flat-top hexes on offset rows. Cell size = full hex width (corner-to-corner across).
+    const r = cell / 2;                       // circumradius
+    const hStep = r * 1.5;                     // horizontal spacing between hex centers
+    const vStep = r * Math.sqrt(3);            // vertical spacing between hex centers
+    let col = 0;
+    for (let cx = offX; cx - r <= W; cx += hStep, col++) {
+      const yShift = (col % 2) ? vStep / 2 : 0;   // stagger every other column
+      for (let cy = offY + yShift; cy - vStep <= H; cy += vStep) {
+        for (let i = 0; i < 6; i++) {
+          const a = Math.PI / 180 * (60 * i);     // flat-top: first vertex at 0°
+          const px = cx + r * Math.cos(a), py = cy + r * Math.sin(a);
+          if (i === 0) ctx.moveTo(px, py); else ctx.lineTo(px, py);
+        }
+        ctx.closePath();
+      }
+    }
+  } else {
+    // Square grid — nested moveTo/lineTo across the full extent.
+    for (let x = offX; x <= W; x += cell) { ctx.moveTo(x + 0.5, 0); ctx.lineTo(x + 0.5, H); }
+    for (let y = offY; y <= H; y += cell) { ctx.moveTo(0, y + 0.5); ctx.lineTo(W, y + 0.5); }
+  }
+  ctx.stroke();
+  ctx.restore();
+}
+
 // ---- Cursors ----
 const cursorEls = {};
 function drawCursor(who, x, y, color, name, pfpHash) {
@@ -1318,6 +1800,164 @@ function drawCursor(who, x, y, color, name, pfpHash) {
   const arrow = c.querySelector('.cursor-arrow');
   if (pfpHash && ASSETS[pfpHash]) arrow.style.backgroundImage = 'url('+ASSETS[pfpHash]+')';
   arrow.style.background = pfpHash && ASSETS[pfpHash] ? `url(${ASSETS[pfpHash]}) center/cover` : color;
+}
+
+// ---- Pings (laser-pointer markers) ----
+// Transient, never persisted. Each ping is a fading marker placed in table space
+// inside #cursorLayer, plus a live off-screen edge arrow (in a non-transformed
+// overlay on #tableStage) that points toward the ping when it's outside the viewport.
+const PING_LIFETIME_MS = 1500;
+const _livePings = [];   // { x, y, color, el, arrow } — live pings for off-screen-arrow tracking
+const PING_ARROW_CAP = 6;   // don't clutter the edge if many pings fire at once
+// Place one ping marker (and its off-screen arrow) at table coords x,y.
+function showPing(x, y, color, name, pfpHash) {
+  const layer = $('#cursorLayer'); if (!layer) return;
+  const c = el('div', { class:'ping', style:{ left: x+'px', top: y+'px', color } });
+  const dot = el('div', { class:'ping-dot' });
+  if (pfpHash && ASSETS[pfpHash]) dot.style.background = `url(${ASSETS[pfpHash]}) center/cover`;
+  else dot.style.background = color;
+  c.appendChild(dot);
+  c.appendChild(el('div', { class:'ping-label', style:{ color } }, name || ''));
+  layer.appendChild(c);
+  // Off-screen guide arrow lives in a non-transformed overlay attached to #tableStage.
+  const arrowLayer = ensurePingArrowLayer();
+  const arrow = arrowLayer ? el('div', { class:'ping-arrow', style:{ color } }) : null;
+  if (arrow) arrowLayer.appendChild(arrow);
+  const entry = { x, y, color, el: c, arrow };
+  _livePings.push(entry);
+  updatePingArrow(entry);
+  // Both the marker and its arrow share the ~1.5s lifetime; remove on the marker's anim end.
+  c.addEventListener('animationend', () => {
+    const i = _livePings.indexOf(entry); if (i >= 0) _livePings.splice(i, 1);
+    c.remove(); if (arrow) arrow.remove();
+  });
+}
+function ensurePingArrowLayer() {
+  const stage = $('#tableStage'); if (!stage) return null;
+  let layer = $('#pingArrowLayer');
+  if (!layer) { layer = el('div', { id:'pingArrowLayer' }); stage.appendChild(layer); }
+  return layer;
+}
+// Position/rotate one ping's edge arrow: project the table point to stage-local screen
+// space (inverse of the cursor transform), and if it's outside the stage rect, clamp it
+// to the nearest edge and rotate the glyph toward the true point. Hidden when on-screen.
+function updatePingArrow(entry) {
+  const arrow = entry.arrow; if (!arrow) return;
+  const stage = $('#tableStage'); if (!stage) { arrow.style.display = 'none'; return; }
+  const r = stage.getBoundingClientRect();
+  const sx = entry.x * tableZoom + tablePanX;   // stage-local x (inverse of cursor formula)
+  const sy = entry.y * tableZoom + tablePanY;   // stage-local y
+  const M = 18;   // keep the arrow this far inside the edge
+  const inside = sx >= 0 && sx <= r.width && sy >= 0 && sy <= r.height;
+  if (inside) { arrow.style.display = 'none'; return; }
+  arrow.style.display = '';
+  const cx = r.width / 2, cy = r.height / 2;
+  const ang = Math.atan2(sy - cy, sx - cx);     // heading from viewport center to the ping
+  const clampedX = Math.max(M, Math.min(r.width  - M, sx));
+  const clampedY = Math.max(M, Math.min(r.height - M, sy));
+  arrow.style.left = clampedX + 'px';
+  arrow.style.top  = clampedY + 'px';
+  arrow.style.transform = `translate(-50%,-50%) rotate(${ang}rad)`;
+}
+// Re-aim every live ping arrow — call after any pan/zoom so arrows track the camera.
+function updatePingArrows() {
+  if (!_livePings.length) return;
+  const extra = _livePings.length - PING_ARROW_CAP;   // cap visible arrows so the edge doesn't clutter
+  for (let i = 0; i < _livePings.length; i++) {
+    const entry = _livePings[i];
+    if (entry.arrow && extra > 0 && i < extra) { entry.arrow.style.display = 'none'; continue; }
+    updatePingArrow(entry);
+  }
+}
+// Drop a ping at the current cursor (table coords). Pure relay — never an op, never
+// persisted. In DEMO mode there's no socket, so render it locally so the demo shows it.
+function sendPing() {
+  const x = lastMouseTableX, y = lastMouseTableY;
+  const boardId = ROLE === 'gm' ? gmViewBoardId : (STATE && STATE.activeBoardId);
+  if (window.DEMO) { showPing(x, y, MY_COLOR, MY_NAME, window._pendingPfpHash); return; }
+  // The relay echoes ping-show to everyone EXCEPT the sender, so render our own ping locally too.
+  showPing(x, y, MY_COLOR, MY_NAME, window._pendingPfpHash);
+  sendToServer({ type:'ping', x, y, boardId });
+}
+
+// ---- Ruler / measure tool ----
+// Transient measuring aid: a line A→B with a live distance label at its midpoint,
+// rendered in table space inside #cursorLayer (so it inherits pan/zoom). Streamed to
+// peers like the cursor/ping — NEVER an op, never persisted, never in the save JSON.
+const rulerEls = {};        // who -> { el, line, label } — one rendered ruler per sender
+let rulerMetric = 'euclid'; // 'euclid' | 'cheby' | 'manhattan' — selectable distance metric
+let _rulerSend = 0;         // throttle gate (~60ms, like cursor/ping)
+let _rulerAnchor = null;    // { x, y } local drag start in table coords, while measuring
+
+// Distance between two table-space points under the active metric, formatted for the
+// active board's grid: cells (1 decimal, + feet at 5ft/cell) when the grid is enabled,
+// otherwise raw pixels. `metric` defaults to the local rulerMetric (sender) but peers
+// pass the received metric so the label matches what the measurer chose.
+function rulerDistanceLabel(ax, ay, bx, by, metric) {
+  const dx = bx - ax, dy = by - ay;
+  let px;
+  if (metric === 'cheby')          px = Math.max(Math.abs(dx), Math.abs(dy));
+  else if (metric === 'manhattan') px = Math.abs(dx) + Math.abs(dy);
+  else                             px = Math.hypot(dx, dy);   // euclid (default)
+  const g = currentGrid();
+  if (g && g.enabled) {
+    const cell = Math.max(20, g.cellSize || 50);
+    const cells = px / cell;
+    return cells.toFixed(1) + ' cells · ' + Math.round(cells * 5) + ' ft';
+  }
+  return '≈ ' + Math.round(px) + ' px';
+}
+
+// Render (or update) the ruler for `who`: a rotated line from A→B plus a midpoint label.
+function showRuler(who, ax, ay, bx, by, metric, color, name) {
+  const layer = $('#cursorLayer'); if (!layer) return;
+  let r = rulerEls[who];
+  if (!r) {
+    const root  = el('div', { class:'ruler', style:{ color } });
+    const line  = el('div', { class:'ruler-line' });
+    const label = el('div', { class:'ruler-label', style:{ color } });
+    root.appendChild(line); root.appendChild(label);
+    layer.appendChild(root);
+    r = rulerEls[who] = { el: root, line, label };
+  }
+  r.el.style.color = color;
+  r.label.style.color = color;
+  const len = Math.hypot(bx - ax, by - ay);
+  const ang = Math.atan2(by - ay, bx - ax);
+  // Line: anchored at A, length = |A→B|, rotated toward B (origin at its left edge).
+  r.line.style.left   = ax + 'px';
+  r.line.style.top    = ay + 'px';
+  r.line.style.width  = len + 'px';
+  r.line.style.transform = `rotate(${ang}rad)`;
+  // Label sits at the midpoint.
+  r.label.style.left = ((ax + bx) / 2) + 'px';
+  r.label.style.top  = ((ay + by) / 2) + 'px';
+  r.label.textContent = rulerDistanceLabel(ax, ay, bx, by, metric);
+}
+
+// Remove a sender's ruler (on release / ruler-hide).
+function hideRuler(who) {
+  const r = rulerEls[who]; if (!r) return;
+  r.el.remove(); delete rulerEls[who];
+}
+
+// Stream the in-progress ruler to peers (throttled). Pure relay — like sendPing, we
+// render our own ruler locally because the relay echoes ruler-show to everyone else.
+function sendRuler(ax, ay, bx, by, force) {
+  const now = Date.now();
+  if (!force && now - _rulerSend < 60) return;
+  _rulerSend = now;
+  showRuler(MY_ID, ax, ay, bx, by, rulerMetric, MY_COLOR, MY_NAME);
+  if (window.DEMO) return;
+  const boardId = ROLE === 'gm' ? gmViewBoardId : (STATE && STATE.activeBoardId);
+  sendToServer({ type:'ruler', ax, ay, bx, by, metric: rulerMetric, boardId });
+}
+
+// Clear our ruler locally and tell peers to drop it. Always safe to call.
+function clearRuler() {
+  _rulerAnchor = null;
+  hideRuler(MY_ID);
+  if (!window.DEMO) sendToServer({ type:'ruler-clear' });
 }
 
 // =================== Right rail ===================
@@ -1343,6 +1983,8 @@ function renderRightRail() {
     notes.appendChild(ta);
     rail.appendChild(notes);
   }
+  // Initiative / turn-order tracker (GM-driven)
+  const initPanel = renderInitiative(); if (initPanel) rail.appendChild(initPanel);
   // GM hand tab
   rail.appendChild(playerPanel('gm', s.hands.gm));
   for (const pid of Object.keys(s.hands)) {
@@ -1354,6 +1996,8 @@ function renderRightRailPlayer() {
   const s = activeState(); if (!s) return;
   const rail = $('#rightRail'); if (!rail) return;
   rail.innerHTML = '';
+  // Initiative / turn-order tracker (read-only for players)
+  const initPanel = renderInitiative(); if (initPanel) rail.appendChild(initPanel);
   // self first
   const me = s.hands[MY_ID];
   if (me) rail.appendChild(playerPanel(MY_ID, me, true));
@@ -1470,6 +2114,79 @@ function playerPanel(pid, p, isSelfOrEditable) {
   for (const c of p.hand || []) handDiv.appendChild(handCardEl(c, pid, editable));
   body.appendChild(el('div', { class:'section-label' }, 'Hand'));
   body.appendChild(handDiv);
+  panel.appendChild(body);
+  return panel;
+}
+
+// ── Initiative / turn-order tracker (right-rail panel) ───────────────────────
+// GM-driven (all init-* ops are GM-only). Players see the same panel READ-ONLY.
+// Reads from activeState().table.initiative (GM: viewed board's table; player:
+// LOCAL_VIEW.table — both projected so the tracker rides the view).
+let initiativeOpen = true;
+function renderInitiative() {
+  const s = activeState(); if (!s || !s.table) return null;
+  const ini = s.table.initiative || { active:0, round:1, entries:[] };
+  const isGM = ROLE === 'gm';
+  const panel = el('details', { id:'initiativePanel' });
+  if (initiativeOpen) panel.setAttribute('open', '');
+  panel.addEventListener('toggle', () => { initiativeOpen = panel.open; });
+
+  const summary = el('summary', {},
+    el('span', { class:'init-title' }, '⚔ Initiative'),
+    el('span', { class:'init-round' }, 'Round ' + (ini.round || 1)));
+  panel.appendChild(summary);
+
+  const body = el('div', { class:'init-body' });
+
+  // GM turn controls
+  if (isGM) {
+    const ctrls = el('div', { class:'init-controls' });
+    ctrls.appendChild(el('button', { class:'mini', title:'Previous turn', onclick: () => sendOp({ type:'init-prev' }) }, '◀ Prev'));
+    ctrls.appendChild(el('button', { class:'mini', title:'Next turn', onclick: () => sendOp({ type:'init-advance' }) }, 'Next ▶'));
+    ctrls.appendChild(el('button', { class:'mini', title:'Sort by value (desc)', onclick: () => sendOp({ type:'init-sort' }) }, '⇅ Sort'));
+    ctrls.appendChild(el('button', { class:'mini', title:'Clear the tracker', onclick: () => { if (confirm('Clear the initiative tracker?')) sendOp({ type:'init-reset' }); } }, '✕ Reset'));
+    body.appendChild(ctrls);
+  }
+
+  // Entry list
+  const list = el('div', { class:'init-list' });
+  if (!ini.entries.length) {
+    list.appendChild(el('div', { class:'init-empty' }, isGM ? 'No combatants. Add rows or right-click a token → Add to initiative.' : 'No combatants yet.'));
+  }
+  ini.entries.forEach((e, i) => {
+    const row = el('div', { class:'init-row' + (i === ini.active ? ' active' : '') + (e.dead ? ' dead' : '') });
+    // Value: editable number for GM, static badge for players.
+    if (isGM) {
+      const valI = el('input', { class:'init-val', type:'number', value: String(e.value) });
+      valI.addEventListener('change', () => sendOp({ type:'init-set-value', id: e.id, value: parseInt(valI.value, 10) || 0 }));
+      row.appendChild(valI);
+    } else {
+      row.appendChild(el('div', { class:'init-val-static' }, String(e.value)));
+    }
+    const nameWrap = el('div', { class:'init-name' }, (e.dead ? '💀 ' : '') + (e.name || 'Combatant'));
+    if (e.instId) nameWrap.classList.add('linked');
+    row.appendChild(nameWrap);
+    if (isGM) {
+      const actions = el('div', { class:'init-actions' });
+      actions.appendChild(el('button', { class:'mini', title: e.dead ? 'Revive' : 'Mark downed', onclick: () => sendOp({ type:'init-toggle-dead', id: e.id }) }, e.dead ? '✚' : '💀'));
+      actions.appendChild(el('button', { class:'mini', title:'Remove', onclick: () => sendOp({ type:'init-remove', id: e.id }) }, '×'));
+      row.appendChild(actions);
+    }
+    list.appendChild(row);
+  });
+  body.appendChild(list);
+
+  // GM: add an ad-hoc combatant row.
+  if (isGM) {
+    const add = el('button', { class:'init-add-btn', onclick: () => {
+      const name = prompt('Combatant name:'); if (name == null || !name.trim()) return;
+      const v = prompt('Initiative value:', '0');
+      if (v == null) return;
+      sendOp({ type:'init-add', name: name.trim(), value: parseInt(v, 10) || 0 });
+    } }, '+ Add row');
+    body.appendChild(add);
+  }
+
   panel.appendChild(body);
   return panel;
 }
@@ -1787,6 +2504,51 @@ function moveOpFor(instId, x, y) {
   const isFig = s && s.table.figurines.some(f => f.instId === instId);
   return { type: isFig ? 'move-figurine' : 'move-table-card', instId, x: Math.round(x), y: Math.round(y) };
 }
+
+// ── Snap-to-grid ──────────────────────────────────────────────────────────────
+// Active-board grid config, regardless of role (snapping applies to everyone's drags
+// when the board has snap enabled). Mirrors currentGrid()'s GM/player split.
+function snapGrid() {
+  if (ROLE === 'gm') return (STATE && STATE.boards) ? (boardById(gmViewBoardId).grid || null) : null;
+  return LOCAL_VIEW ? (LOCAL_VIEW.grid || null) : null;
+}
+// Snap a token (top-left x,y of size w,h) so its CENTER lands on the nearest cell/hex
+// center, then back-solve the top-left. Returns { x, y } (rounded). Oversized things
+// (e.g. a battle map ≥ ~3 cells in BOTH dims) are left free so they don't jitter.
+function snapXY(x, y, w, h) {
+  const g = snapGrid();
+  if (!g || !g.enabled || !g.snap) return { x: Math.round(x), y: Math.round(y) };
+  const cell = Math.max(20, g.cellSize || 50);
+  if (w >= cell * 3 && h >= cell * 3) return { x: Math.round(x), y: Math.round(y) };  // size-aware: skip maps
+  const offX = g.offsetX || 0, offY = g.offsetY || 0;
+  const cx = x + w / 2, cy = y + h / 2;          // token center (table coords)
+  let sx, sy;                                     // snapped center
+  if (g.type === 'hex') {
+    // Flat-top hex centers: nearest center via axial rounding on the hex lattice.
+    const r = cell / 2;
+    const hStep = r * 1.5, vStep = r * Math.sqrt(3);
+    const lx = cx - offX, ly = cy - offY;
+    const col = Math.round(lx / hStep);            // which staggered column
+    const yShift = (((col % 2) + 2) % 2) ? vStep / 2 : 0;
+    const row = Math.round((ly - yShift) / vStep);
+    sx = offX + col * hStep;
+    sy = offY + yShift + row * vStep;
+  } else {
+    // Square: nearest cell center.
+    sx = offX + (Math.round((cx - offX) / cell - 0.5) + 0.5) * cell;
+    sy = offY + (Math.round((cy - offY) / cell - 0.5) + 0.5) * cell;
+  }
+  return { x: Math.round(sx - w / 2), y: Math.round(sy - h / 2) };
+}
+// Look up a draggable's size by instId (figurine or table card) for snap math.
+function sizeOf(instId) {
+  const s = activeState(); if (!s) return null;
+  const f = s.table.figurines.find(x => x.instId === instId);
+  if (f) return { w: f.w, h: f.h };
+  const c = s.table.cards.find(x => x.instId === instId);
+  if (c) return { w: c.w || 140, h: c.h || 200 };   // table cards have no explicit w/h — use the rendered size
+  return null;
+}
 // Send many ops as one batch (one broadcast/render) — or a single op directly.
 function sendBatch(ops) { if (ops.length) sendOp(ops.length === 1 ? ops[0] : { type:'batch', ops }); }
 // Center-anchored scale fields for a figurine.
@@ -1852,6 +2614,21 @@ function showFigurineContextMenu(f, e) {
       } },
     { label: (f.showName ? '✓ ' : '  ') + 'Show name', action: () => figEdit(f, t => ({ showName: !t.showName })) },
     { label:'❤ Edit HP / Armor...', action: () => showTokenDetailPopup(f, e) },
+    // GM-only: drop this token onto the initiative tracker (linked by instId).
+    ...(ROLE === 'gm' ? [{
+      label:'⚔ Add to initiative', action: () => {
+        const s = activeState();
+        const nm = f.label || (f.kind === 'character' ? (s?.hands?.[f.playerId]?.name) : '') || 'Combatant';
+        const v = prompt('Initiative value for ' + nm + ':', '0');
+        if (v == null) return;
+        sendOp({ type:'init-add', name: nm, value: parseInt(v, 10) || 0, instId: f.instId });
+      },
+    }] : []),
+    // GM-only on-deck staging: hide a non-character token from players (or reveal it).
+    ...((ROLE === 'gm' && f.kind !== 'character') ? [{
+      label: f.hidden ? '👁 Reveal to players' : '🚫 Hide from players',
+      action: () => sendOp({ type:'set-figurine-hidden', instId: f.instId, hidden: !f.hidden, boardId: gmViewBoardId }),
+    }] : []),
     '-',
     // Status effects — toggle each across the selection.
     ...STATUS_EFFECTS.map(([key, label]) => ({
@@ -1887,6 +2664,7 @@ function showFigurineContextMenu(f, e) {
     '-',
     { label:'Transparency...', action: () => showOpacitySlider(f, e.clientX, e.clientY) },
     { label:'Reset transparency', action: () => figEdit(f, () => ({ opacity: 1 })) },
+    { label:'◎ Aura / Range…', action: () => showAuraPopup(f, e.clientX, e.clientY) },
     '-',
     { label:'Bring to front', action: () => figEdit(f, () => ({ bringToFront: true })) },
     { label:'Send to back', action: () => figEdit(f, () => ({ sendToBack: true })) },
@@ -1920,6 +2698,93 @@ function showOpacitySlider(f, x, y) {
   const close = el('button', { style:{ marginTop:'6px', width:'100%' }, onclick: () => popup.remove() }, 'Close');
   popup.appendChild(close);
   document.body.appendChild(popup);
+}
+
+function showAuraPopup(f, x, y) {
+  $$('.ctx-menu').forEach(m => m.remove());
+  $$('.aura-popup').forEach(m => m.remove());
+  const cur = f.aura || { radius: 120, color: '#3b82f6', opacity: 0.18, shape: 'circle' };
+  const popup = el('div', { class:'ctx-menu aura-popup', style:{ left:x+'px', top:y+'px', padding:'10px', minWidth:'220px' }});
+
+  // Title
+  popup.appendChild(el('div', { style:{ fontSize:'11px', color:'#9bb1c9', marginBottom:'8px' }}, 'Aura / Range'));
+
+  // Radius row
+  const radRow = el('div', { style:{ display:'flex', alignItems:'center', gap:'6px', marginBottom:'6px' }});
+  radRow.appendChild(el('span', { style:{ fontSize:'11px', color:'var(--text)', flex:'0 0 auto' }}, 'Radius'));
+  const radVal = el('span', { style:{ fontSize:'11px', minWidth:'32px', textAlign:'right', flex:'0 0 auto' }}, cur.radius + 'px');
+  const radSlider = el('input', { type:'range', min:'0', max:'600', value: String(cur.radius), style:{ flex:'1' }});
+  radSlider.addEventListener('input', () => { radVal.textContent = radSlider.value + 'px'; });
+  radRow.appendChild(radSlider);
+  radRow.appendChild(radVal);
+  popup.appendChild(radRow);
+
+  // Color row
+  const colorRow = el('div', { style:{ display:'flex', alignItems:'center', gap:'6px', marginBottom:'6px' }});
+  colorRow.appendChild(el('span', { style:{ fontSize:'11px', color:'var(--text)', flex:'0 0 auto' }}, 'Color'));
+  const colorI = el('input', { type:'color', value: cur.color || '#3b82f6',
+    style:{ width:'32px', height:'24px', padding:'2px', cursor:'pointer', border:'1px solid var(--line)', borderRadius:'var(--radius)', background:'transparent', flex:'0 0 auto' }});
+  colorRow.appendChild(colorI);
+  popup.appendChild(colorRow);
+
+  // Opacity row
+  const opRow = el('div', { style:{ display:'flex', alignItems:'center', gap:'6px', marginBottom:'6px' }});
+  opRow.appendChild(el('span', { style:{ fontSize:'11px', color:'var(--text)', flex:'0 0 auto' }}, 'Fill opacity'));
+  const opVal = el('span', { style:{ fontSize:'11px', minWidth:'32px', textAlign:'right', flex:'0 0 auto' }}, Math.round((cur.opacity != null ? cur.opacity : 0.18)*100) + '%');
+  const opSlider = el('input', { type:'range', min:'0', max:'60', value: String(Math.round((cur.opacity != null ? cur.opacity : 0.18)*100)), style:{ flex:'1' }});
+  opSlider.addEventListener('input', () => { opVal.textContent = opSlider.value + '%'; });
+  opRow.appendChild(opSlider);
+  opRow.appendChild(opVal);
+  popup.appendChild(opRow);
+
+  // Shape toggle
+  const shapeRow = el('div', { style:{ display:'flex', alignItems:'center', gap:'6px', marginBottom:'8px' }});
+  shapeRow.appendChild(el('span', { style:{ fontSize:'11px', color:'var(--text)', flex:'0 0 auto' }}, 'Shape'));
+  let curShape = cur.shape || 'circle';
+  const shapeBtn = el('button', { style:{ fontSize:'11px', padding:'2px 8px' }}, curShape === 'circle' ? '● Circle' : '■ Square');
+  shapeBtn.addEventListener('click', () => {
+    curShape = curShape === 'circle' ? 'square' : 'circle';
+    shapeBtn.textContent = curShape === 'circle' ? '● Circle' : '■ Square';
+  });
+  shapeRow.appendChild(shapeBtn);
+  popup.appendChild(shapeRow);
+
+  // Buttons row
+  const btnRow = el('div', { style:{ display:'flex', gap:'6px' }});
+
+  const applyBtn = el('button', { style:{ flex:'1', fontSize:'11px' }}, 'Apply');
+  applyBtn.addEventListener('click', () => {
+    const radius = parseInt(radSlider.value, 10);
+    const color = colorI.value;
+    const opacity = parseInt(opSlider.value, 10) / 100;
+    const shape = curShape;
+    figEdit(f, () => ({ aura: { radius, color, opacity, shape } }));
+    popup.remove();
+  });
+  btnRow.appendChild(applyBtn);
+
+  const clearBtn = el('button', { style:{ flex:'1', fontSize:'11px' }}, 'Clear');
+  clearBtn.addEventListener('click', () => {
+    figEdit(f, () => ({ aura: null }));
+    popup.remove();
+  });
+  btnRow.appendChild(clearBtn);
+
+  const closeBtn = el('button', { style:{ flex:'1', fontSize:'11px' }}, 'Close');
+  closeBtn.addEventListener('click', () => popup.remove());
+  btnRow.appendChild(closeBtn);
+
+  popup.appendChild(btnRow);
+
+  // Position in-viewport
+  document.body.appendChild(popup);
+  const rect = popup.getBoundingClientRect();
+  if (rect.right > window.innerWidth)  popup.style.left = Math.max(0, window.innerWidth  - rect.width  - 4) + 'px';
+  if (rect.bottom > window.innerHeight) popup.style.top = Math.max(0, window.innerHeight - rect.height - 4) + 'px';
+
+  // Click-away to close
+  const onAway = e => { if (!popup.contains(e.target)) { popup.remove(); document.removeEventListener('mousedown', onAway, true); } };
+  document.addEventListener('mousedown', onAway, true);
 }
 
 // =================== Group helpers ===================
@@ -2054,15 +2919,24 @@ function makeDraggable(elm, onEnd, instId) {
         if (gel) { gel.style.left = (g.x0 + dx) + 'px'; gel.style.top = (g.y0 + dy) + 'px'; }
       }
     };
-    const onUp = () => {
+    const onUp = (ev) => {
       window.removeEventListener('mousemove', onMove);
       window.removeEventListener('mouseup', onUp);
       _isDragging = false;
+      // Snap-to-grid on drop. Ctrl bypasses (free placement, à la Owlbear). We snap the
+      // dragged anchor's CENTER, then carry the resulting delta to the rest of the group
+      // so a formation translates as one piece instead of shearing onto separate cells.
+      const noSnap = ev && ev.ctrlKey;
+      let endX = lastX, endY = lastY;
+      if (!noSnap && instId) {
+        const sz = sizeOf(instId);
+        if (sz) { const sn = snapXY(lastX, lastY, sz.w, sz.h); endX = sn.x; endY = sn.y; }
+      }
       if (groupMembers.length) {
         // Move the whole group in one batch — single broadcast/render.
-        const dx = lastX - x0, dy = lastY - y0;
-        const ops = [moveOpFor(instId, lastX, lastY)];
-        if (instId) markOptimisticMove(instId, lastX, lastY);
+        const dx = endX - x0, dy = endY - y0;
+        const ops = [moveOpFor(instId, endX, endY)];
+        if (instId) markOptimisticMove(instId, endX, endY);
         for (const g of groupMembers) {
           const gx = Math.round(g.x0 + dx), gy = Math.round(g.y0 + dy);
           ops.push({ type: g.kind === 'figurine' ? 'move-figurine' : 'move-table-card', instId: g.instId, x: gx, y: gy });
@@ -2070,8 +2944,8 @@ function makeDraggable(elm, onEnd, instId) {
         }
         sendBatch(ops);
       } else {
-        onEnd(lastX, lastY);
-        if (instId) markOptimisticMove(instId, lastX, lastY);
+        onEnd(endX, endY);
+        if (instId) markOptimisticMove(instId, endX, endY);
       }
     };
     window.addEventListener('mousemove', onMove);
@@ -2123,10 +2997,21 @@ let currentTool = 'pointer';
 let currentColor = '#3b82f6';
 let currentWidth = 3;
 let activeStroke = null;
+let templateShape = 'circle';   // shape the AoE-template placement tool will drop
+// ---- Fog of war authoring state (GM-only) ----
+let fogMode = 'cut';            // 'cut' (reveal) | 'hide' (re-cover) — what a fog stroke does
+let fogShapeKind = 'brush';     // 'brush' | 'rect' — brush sub-mode of the fog tool
+let fogBrushSize = 120;         // brush diameter in table units
+let fogStroke = null;           // in-progress brush: { points:[[x,y],...] }
+let fogRectAnchor = null;       // in-progress rect: { x, y } (table coords)
 const PATH_TO_HASH = {};   // relativePath → hash; lets players look up received card images by path
 let _chatUnread = 0;
 let _chatPaneActive = false;
 let _lastChatCount = 0;
+// Client-local buffer of received/echoed whispers. NEVER part of state.chat / the view /
+// autosave — whispers are pure targeted relay, so they live only in this module array.
+// Each entry: { from, to, text, color, name, ts } (ids are slot ids: 'gm'/'playerN').
+let _whispers = [];
 function _updateChatBadge() {
   const badge = $('#chatBadge'); if (!badge) return;
   if (_chatUnread > 0) { badge.style.display = 'inline'; badge.textContent = _chatUnread > 99 ? '99+' : String(_chatUnread); }
@@ -2178,6 +3063,30 @@ function setupTableInteraction() {
   });
   window.addEventListener('keyup', e => { _panHeld.delete(e.key.toLowerCase()); });
   window.addEventListener('blur', () => { _panHeld.clear(); });
+
+  // Q = hold-to-ping (laser pointer). Works regardless of the active tool. While held,
+  // it streams a ping at the live cursor on a single rAF loop, throttled to ~60ms like
+  // the cursor send. Q is otherwise unbound (checked KEYBIND_HELP + all keydown handlers).
+  let _pingHeld = false;
+  let _pingRAF = null;
+  function _pingTick() {
+    if (!_pingHeld) { _pingRAF = null; return; }
+    const now = Date.now();
+    if (now - pingThrottle > 60) { pingThrottle = now; sendPing(); }
+    _pingRAF = requestAnimationFrame(_pingTick);
+  }
+  window.addEventListener('keydown', e => {
+    if (e.key !== 'q' && e.key !== 'Q') return;
+    if (e.target.matches && e.target.matches('input,textarea,select')) return;   // don't hijack typing
+    if (e.ctrlKey || e.metaKey || e.altKey) return;                              // leave Ctrl/Cmd/Alt combos alone
+    e.preventDefault();
+    if (_pingHeld) return;                          // ignore OS auto-repeat
+    _pingHeld = true;
+    pingThrottle = 0;                               // fire immediately on press
+    if (!_pingRAF) _pingRAF = requestAnimationFrame(_pingTick);
+  });
+  window.addEventListener('keyup', e => { if (e.key === 'q' || e.key === 'Q') _pingHeld = false; });
+  window.addEventListener('blur', () => { _pingHeld = false; });
 
   // Arrow keys move the selected tokens — or, for a player with nothing selected,
   // their own character token. Shift = bigger steps. We mirror the WASD pattern: a held
@@ -2286,7 +3195,7 @@ function setupTableInteraction() {
     const onTable = e.target === stage || (e.target.closest && e.target.closest('#tableContent'));
     if (!onTable) return;
     e.preventDefault(); e.stopPropagation();
-    stampAt(e.clientX, e.clientY);
+    stampAt(e.clientX, e.clientY, e.ctrlKey);
   }, true);
 
   // Spawn-zone tool — capture-phase rectangle drag sets the viewed board's zone.
@@ -2314,6 +3223,40 @@ function setupTableInteraction() {
     };
     window.addEventListener('mousemove', onMove); window.addEventListener('mouseup', onUp);
   }, true);
+
+  // AoE-template placement tool — capture-phase click-drag: down-point = origin, drag
+  // distance = size. A live SVG preview tracks the drag; on release we add-template.
+  stage.addEventListener('mousedown', e => {
+    if (currentTool !== 'template' || e.button !== 0 || spaceHeld) return;
+    const onTable = e.target === stage || (e.target.closest && e.target.closest('#tableContent'));
+    if (!onTable) return;
+    e.preventDefault(); e.stopPropagation();
+    const tc = $('#tableContent'); const cr = tc.getBoundingClientRect();
+    const ox = (e.clientX - cr.left) / tableZoom, oy = (e.clientY - cr.top) / tableZoom;
+    const layer = $('#templateLayer');
+    const pxPerCell = tplPxPerCell();
+    const preview = svgEl('g', { id:'tplDraft' });
+    layer.appendChild(preview);
+    let rot = 0, size = 1;
+    const update = (mx, my) => {
+      const dx = mx - ox, dy = my - oy;
+      const distPx = Math.hypot(dx, dy);
+      size = Math.max(0.5, Math.round((distPx / pxPerCell) * 2) / 2);
+      rot = Math.round(Math.atan2(dy, dx) * 180 / Math.PI);
+      buildTplInner(preview, { instId:'__draft__', shape: templateShape, size, width:1, color: currentColor, locked:true }, pxPerCell);
+      preview.setAttribute('transform', `translate(${Math.round(ox)},${Math.round(oy)}) rotate(${rot})`);
+    };
+    update(ox, oy);
+    const onMove = ev => { update((ev.clientX - cr.left) / tableZoom, (ev.clientY - cr.top) / tableZoom); };
+    const onUp = () => {
+      window.removeEventListener('mousemove', onMove); window.removeEventListener('mouseup', onUp);
+      preview.remove();
+      sendOp({ type:'add-template', shape: templateShape, x: Math.round(ox), y: Math.round(oy),
+        rot, size, width: 1, color: currentColor });
+    };
+    window.addEventListener('mousemove', onMove); window.addEventListener('mouseup', onUp);
+  }, true);
+
   // Ghost follows the cursor while stamping
   stage.addEventListener('mousemove', e => {
     if (!stampMode || !stampGhost) return;
@@ -2377,9 +3320,45 @@ function setupTableInteraction() {
       e.preventDefault();
       const r = canvas.getBoundingClientRect();
       eraseAt((e.clientX - r.left) / tableZoom, (e.clientY - r.top) / tableZoom);
+    } else if (currentTool === 'ping') {
+      e.preventDefault();
+      pingThrottle = Date.now(); sendPing();   // drop one immediately on press
+    } else if (currentTool === 'ruler') {
+      e.preventDefault();
+      const r = canvas.getBoundingClientRect();
+      _rulerAnchor = { x: (e.clientX - r.left) / tableZoom, y: (e.clientY - r.top) / tableZoom };
+      _rulerSend = 0;   // fire immediately so a zero-length ruler appears on press
+    } else if (currentTool === 'fog' && ROLE === 'gm') {
+      e.preventDefault();
+      const r = canvas.getBoundingClientRect();
+      const x = (e.clientX - r.left) / tableZoom, y = (e.clientY - r.top) / tableZoom;
+      if (fogShapeKind === 'rect') { fogRectAnchor = { x, y }; drawFogPreview(x, y); }
+      else { fogStroke = { points: [[x, y]] }; drawFogPreview(); }
     }
   });
   canvas.addEventListener('mousemove', e => {
+    // Ruler tool: while LMB held, stream the A→B line, throttled like the cursor send.
+    if (currentTool === 'ruler' && _rulerAnchor && (e.buttons & 1)) {
+      const r = canvas.getBoundingClientRect();
+      const bx = (e.clientX - r.left) / tableZoom, by = (e.clientY - r.top) / tableZoom;
+      sendRuler(_rulerAnchor.x, _rulerAnchor.y, bx, by);
+      return;
+    }
+    // Ping tool: while LMB held, stream pings at the cursor, throttled like the cursor send.
+    if (currentTool === 'ping' && (e.buttons & 1)) {
+      const now = Date.now();
+      if (now - pingThrottle > 60) { pingThrottle = now; sendPing(); }
+      return;
+    }
+    // Fog tool: while LMB held, extend the brush polyline or rubber-band the rect; the
+    // preview repaints live (the committed cut is sent on release).
+    if (currentTool === 'fog' && ROLE === 'gm' && (e.buttons & 1)) {
+      const r = canvas.getBoundingClientRect();
+      const x = (e.clientX - r.left) / tableZoom, y = (e.clientY - r.top) / tableZoom;
+      if (fogShapeKind === 'rect' && fogRectAnchor) drawFogPreview(x, y);
+      else if (fogStroke) { fogStroke.points.push([x, y]); drawFogPreview(); }
+      return;
+    }
     // Continuous-erase: while LMB held in eraser mode, erase strokes under the cursor.
     if (currentTool !== 'eraser' || !(e.buttons & 1)) return;
     const r = canvas.getBoundingClientRect();
@@ -2387,18 +3366,20 @@ function setupTableInteraction() {
   });
   window.addEventListener('mouseup', e => {
     if (e.button === 0) finishStroke();
+    if (e.button === 0) finishFogStroke();   // commit a fog cut/hide on release
+    if (e.button === 0 && _rulerAnchor) clearRuler();   // release the ruler → clear locally + tell peers
     if ((e.button === 0 || e.button === 1) && isPanning) {   // end Space-drag or middle-drag pan
       isPanning = false;
       stage.style.cursor = spaceHeld ? 'grab' : '';
     }
   });
-  window.addEventListener('blur', () => { finishStroke(); spaceHeld = false; isPanning = false; });
+  window.addEventListener('blur', () => { finishStroke(); finishFogStroke(); spaceHeld = false; isPanning = false; if (_rulerAnchor) clearRuler(); });
 
   // Escape = clear selection / exit stamper
   window.addEventListener('keydown', e => {
     if (e.key === 'Escape') {
       if (e.target.matches && e.target.matches('input,textarea,select')) return;
-      if (stampMode || spawnZoneMode) { setTool('pointer'); return; }
+      if (stampMode || spawnZoneMode || currentTool === 'ping' || currentTool === 'ruler' || currentTool === 'template' || currentTool === 'fog') { setTool('pointer'); return; }
       selectionSet.clear(); $$('.ctx-menu').forEach(m => m.remove()); rerenderAll();
     }
   });
@@ -2426,6 +3407,7 @@ function setupTableInteraction() {
     if (k === '1') return setTool('pointer');
     if (k === '2') return setTool('pen');
     if (k === '3') return setTool('eraser');
+    if (k === 'm') return setTool(currentTool === 'ruler' ? 'pointer' : 'ruler');
     if (k === 't' && ROLE === 'gm') { setTool(stampMode ? 'pointer' : 'stamp'); return; }
 
     if (!hoverInfo || !s) return;
@@ -2542,6 +3524,61 @@ function finishStroke() {
   if (live) { const ctx = live.getContext('2d'); ctx.clearRect(0, 0, live.width, live.height); }
 }
 
+// ---- Fog authoring (GM-only) ----
+// Decimate near-duplicate brush points so the stored shape stays small (mirrors the
+// drawing system's keep-state-small constraint). Keeps endpoints + samples spaced ≥min.
+function decimatePoints(points, min) {
+  if (points.length <= 2) return points;
+  const out = [points[0]]; const m2 = min * min;
+  for (let i = 1; i < points.length - 1; i++) {
+    const [px, py] = out[out.length - 1], [x, y] = points[i];
+    if ((x - px) * (x - px) + (y - py) * (y - py) >= m2) out.push(points[i]);
+  }
+  out.push(points[points.length - 1]);
+  return out;
+}
+// Commit the in-progress fog brush/rect as a fog-cut (reveal) or fog-hide op, targeting
+// the GM's previewed board. The host echoes a fog-add patch (idempotent by id); we render
+// optimistically here for instant feedback.
+function finishFogStroke() {
+  const type = fogMode === 'hide' ? 'fog-hide' : 'fog-cut';
+  const mode = fogMode === 'hide' ? 'hide' : 'reveal';
+  let shape = null;
+  if (fogShapeKind === 'rect' && fogRectAnchor) {
+    const a = fogRectAnchor, b = _fogLast || a;
+    const x = Math.min(a.x, b.x), y = Math.min(a.y, b.y);
+    const w = Math.abs(b.x - a.x), h = Math.abs(b.y - a.y);
+    if (w > 2 && h > 2) shape = { kind:'rect', rect:{ x, y, w, h } };
+  } else if (fogStroke && fogStroke.points.length) {
+    shape = { kind:'brush', points: decimatePoints(fogStroke.points, 6), width: fogBrushSize };
+  }
+  fogStroke = null; fogRectAnchor = null; _fogLast = null;
+  if (!shape) { renderFog(); return; }   // tiny/empty gesture — just clear any preview
+  // Optimistic local render: push onto the viewed board's fog now so the cut shows instantly.
+  const tbl = tableOf();
+  if (tbl) { (tbl.fog = tbl.fog || ENGINE.defaultFog()).shapes.push({ id: 'local-fog', mode, ...shape }); renderFog(); }
+  sendOp({ type, boardId: ROLE === 'gm' ? gmViewBoardId : undefined, shape });
+}
+// Repaint the fog layer with the in-progress shape overlaid, so the GM sees the cut live.
+let _fogLast = null;   // last cursor point for the rect rubber-band
+function drawFogPreview(x, y) {
+  if (x != null && y != null) _fogLast = { x, y };
+  renderFog();   // committed fog first
+  const canvas = $('#fogLayer'); if (!canvas) return;
+  const ctx = canvas.getContext('2d');
+  // Author preview is always visible at the GM's 0.5 layer opacity, so force the layer on.
+  if (canvas.style.opacity === '0') canvas.style.opacity = ROLE === 'gm' ? '0.5' : '1';
+  if (fogMode === 'hide') { ctx.globalCompositeOperation = 'source-over'; ctx.strokeStyle = ctx.fillStyle = FOG_COLOR; }
+  else { ctx.globalCompositeOperation = 'destination-out'; ctx.strokeStyle = ctx.fillStyle = '#000'; }
+  if (fogShapeKind === 'rect' && fogRectAnchor && _fogLast) {
+    const a = fogRectAnchor, b = _fogLast;
+    paintFogShape(ctx, { kind:'rect', rect:{ x: Math.min(a.x,b.x), y: Math.min(a.y,b.y), w: Math.abs(b.x-a.x), h: Math.abs(b.y-a.y) } });
+  } else if (fogStroke) {
+    paintFogShape(ctx, { kind:'brush', points: fogStroke.points, width: fogBrushSize });
+  }
+  ctx.globalCompositeOperation = 'source-over';
+}
+
 
 // Hit-test a click against every drawing and remove the first stroke the cursor
 // is close enough to. "Close enough" = within (strokeWidth/2 + slack) of any segment.
@@ -2602,12 +3639,15 @@ function setTool(t) {
   $$('.tool-btn').forEach(b => b.classList.toggle('active', b.dataset.tool === t));
   const canvas = $('#drawLayer');
   if (canvas) {
-    const drawing = (t === 'pen' || t === 'eraser');
-    canvas.style.pointerEvents = drawing ? 'auto' : 'none';
-    // Raise above cards/figurines while drawing so clicks aren't swallowed by them.
-    canvas.style.zIndex = drawing ? '999999' : 'auto';
-    canvas.style.cursor = t === 'pen' ? 'crosshair' : t === 'eraser' ? 'cell' : 'default';
+    // pen/eraser draw; ping captures left-clicks to drop markers; ruler captures a
+    // measure drag; fog paints reveal/hide cuts — all of them claim the canvas.
+    const grab = (t === 'pen' || t === 'eraser' || t === 'ping' || t === 'ruler' || t === 'fog');
+    canvas.style.pointerEvents = grab ? 'auto' : 'none';
+    // Raise above cards/figurines while active so clicks aren't swallowed by them.
+    canvas.style.zIndex = grab ? '999999' : 'auto';
+    canvas.style.cursor = t === 'pen' ? 'crosshair' : t === 'eraser' ? 'cell' : (t === 'ping' || t === 'ruler' || t === 'fog') ? 'crosshair' : 'default';
   }
+  if (t !== 'ruler') clearRuler();   // leaving the ruler tool drops any in-progress line
   // Enter/exit token stamper mode
   if (t === 'stamp') enterStampMode();
   else if (stampMode) exitStampMode();
@@ -2757,11 +3797,12 @@ function buildStampPanel() {
   setSize(stampSize, false);
 }
 
-async function stampAt(clientX, clientY) {
+async function stampAt(clientX, clientY, noSnap) {
   const tc = $('#tableContent'); if (!tc) return;
   const cr = tc.getBoundingClientRect();
-  const x = Math.round((clientX - cr.left) / tableZoom - stampSize / 2);
-  const y = Math.round((clientY - cr.top)  / tableZoom - stampSize / 2);
+  let x = Math.round((clientX - cr.left) / tableZoom - stampSize / 2);
+  let y = Math.round((clientY - cr.top)  / tableZoom - stampSize / 2);
+  if (!noSnap) { const sn = snapXY(x, y, stampSize, stampSize); x = sn.x; y = sn.y; }   // snap drop to grid (Ctrl bypasses)
   const tok = stampNextToken || pickStampToken(); if (!tok) return;
   const raw = await loadAssetAsDataUrl(tok.path); if (!raw) return;
   const dataUrl = await compressDataUrl(raw, 512, 0.85);   // share a small token, not the full-res file
@@ -2820,7 +3861,7 @@ async function compressDataUrl(dataUrl, maxDim, quality, mime='image/png') {
   });
 }
 
-async function uploadFigurine(file, kind='figurine') {
+async function uploadFigurine(file, kind='figurine', opts={}) {
   if (!file) return;
   // Keep shared images small — they travel over the GM's uplink. PNG keeps token transparency.
   const dataUrl = await compressImage(file, kind === 'map' ? 1280 : 640, kind === 'map' ? 0.72 : 0.9, kind === 'map' ? 'image/jpeg' : 'image/png');
@@ -2828,7 +3869,146 @@ async function uploadFigurine(file, kind='figurine') {
   ASSETS[hash] = dataUrl;
   await cacheAssetPut(hash, { kind, dataUrl });
   sendAsset(hash, dataUrl, kind);                  // share via host
-  sendOp({ type:'add-figurine', hash, w: kind==='map'?600:120, h: kind==='map'?400:120 });
+  const op = { type:'add-figurine', hash, w: kind==='map'?600:120, h: kind==='map'?400:120 };
+  if (opts.x != null) op.x = Math.round(opts.x);
+  if (opts.y != null) op.y = Math.round(opts.y);
+  sendOp(op);
+}
+
+// =================== Drop / paste image import ===================
+
+// Show a small glassmorphism picker so the user can choose Map vs Token.
+// clientX/clientY: screen position for the popover anchor.
+// tableX/tableY: table-space coords for figurine placement.
+function showImageImportPicker(file, clientX, clientY, tableX, tableY) {
+  // Remove any existing picker.
+  document.getElementById('imgImportPicker')?.remove();
+
+  const picker = el('div', { id:'imgImportPicker', class:'img-import-picker' });
+
+  const label = el('div', { class:'img-import-label' }, 'Place as…');
+  picker.appendChild(label);
+
+  const btnRow = el('div', { class:'img-import-btns' });
+
+  const mapBtn = el('button', { class:'tool-btn' }, 'Map');
+  mapBtn.addEventListener('click', () => {
+    picker.remove();
+    uploadFigurine(file, 'map', { x: tableX - 300, y: tableY - 200 });
+  });
+  btnRow.appendChild(mapBtn);
+
+  const tokBtn = el('button', { class:'tool-btn' }, 'Token');
+  tokBtn.addEventListener('click', () => {
+    picker.remove();
+    uploadFigurine(file, 'figurine', { x: tableX - 60, y: tableY - 60 });
+  });
+  btnRow.appendChild(tokBtn);
+
+  picker.appendChild(btnRow);
+  picker.style.left = clientX + 'px';
+  picker.style.top  = clientY + 'px';
+  document.body.appendChild(picker);
+
+  // Reposition to stay fully in-viewport (same pattern as ctx-menu).
+  const r = picker.getBoundingClientRect();
+  if (r.bottom > window.innerHeight) picker.style.top  = Math.max(0, clientY - r.height) + 'px';
+  if (r.right  > window.innerWidth)  picker.style.left = Math.max(0, clientX - r.width)  + 'px';
+
+  // Dismiss on click-outside or Escape.
+  const onDocDown = ev => { if (!picker.contains(ev.target)) dismiss(); };
+  const onKey     = ev => { if (ev.key === 'Escape') dismiss(); };
+  function dismiss() {
+    picker.remove();
+    document.removeEventListener('mousedown', onDocDown, true);
+    document.removeEventListener('keydown', onKey, true);
+  }
+  setTimeout(() => {
+    document.addEventListener('mousedown', onDocDown, true);
+    document.addEventListener('keydown', onKey, true);
+  }, 0);
+}
+
+// Convert a clientX/clientY screen point to table-space coords (mirrors stampAt approach).
+function clientToTable(clientX, clientY) {
+  const tc = $('#tableContent'); if (!tc) return { x:0, y:0 };
+  const cr = tc.getBoundingClientRect();
+  return { x: (clientX - cr.left) / tableZoom, y: (clientY - cr.top) / tableZoom };
+}
+
+// Register drop/paste handlers once the stage element is available.
+// Called from within initTable() after #tableStage is in the DOM.
+function initImageImport() {
+  const stage = $('#tableStage'); if (!stage) return;
+
+  // ── Drop hint overlay (injected into stage, shown during drag-over) ──
+  const hint = el('div', { id:'dropImageHint' }, 'Drop image here');
+  stage.appendChild(hint);
+
+  // ── dragover on #stage: allow drop + show hint ──
+  stage.addEventListener('dragover', e => {
+    // Only care about file drags that include an image.
+    const hasImage = e.dataTransfer && [...(e.dataTransfer.items || [])].some(i => i.kind === 'file' && i.type.startsWith('image/'));
+    if (!hasImage) return;
+    e.preventDefault();
+    e.dataTransfer.dropEffect = 'copy';
+    hint.classList.add('active');
+  });
+
+  stage.addEventListener('dragleave', e => {
+    // Only hide when leaving the stage entirely (not entering a child element).
+    if (!stage.contains(e.relatedTarget)) hint.classList.remove('active');
+  });
+
+  // ── drop on #stage ──
+  stage.addEventListener('drop', e => {
+    hint.classList.remove('active');
+    e.preventDefault();
+    e.stopPropagation();
+    const files = [...(e.dataTransfer.files || [])].filter(f => f.type.startsWith('image/'));
+    if (!files.length) { console.warn('[Deck Quest] Drop ignored: no image files.'); return; }
+    const tPos = clientToTable(e.clientX, e.clientY);
+    showImageImportPicker(files[0], e.clientX, e.clientY, tPos.x, tPos.y);
+  });
+
+  // ── Window-level guard: prevent the browser from navigating on an off-stage drop ──
+  window.addEventListener('dragover', e => {
+    // Always prevent the browser default so it never navigates.
+    e.preventDefault();
+    if (e.dataTransfer) e.dataTransfer.dropEffect = 'none';
+  });
+  window.addEventListener('drop', e => {
+    // If the drop landed on the stage (handled above), do nothing here.
+    if (stage.contains(e.target) || e.target === stage) return;
+    e.preventDefault();   // block navigation for off-stage drops
+  });
+
+  // ── Paste handler on document ──
+  document.addEventListener('paste', e => {
+    // Let text inputs / contenteditables handle their own paste.
+    const active = document.activeElement;
+    if (active && (active.tagName === 'INPUT' || active.tagName === 'TEXTAREA' || active.isContentEditable)) return;
+
+    // Scan for an image blob in the clipboard.
+    const items = e.clipboardData ? [...e.clipboardData.items] : [];
+    const imgItem = items.find(it => it.type.startsWith('image/'));
+    if (!imgItem) return;   // no image — let Ctrl+V figurine paste run normally
+
+    e.preventDefault();
+    const blob = imgItem.getAsFile();
+    if (!blob) return;
+
+    // Open the picker at the current cursor position in table space.
+    // Convert lastMouseTableX/Y (already table coords) back to screen for the popover anchor.
+    const tc = $('#tableContent');
+    let px = window.innerWidth / 2, py = window.innerHeight / 2;   // fallback: centre of viewport
+    if (tc) {
+      const cr = tc.getBoundingClientRect();
+      px = cr.left + lastMouseTableX * tableZoom;
+      py = cr.top  + lastMouseTableY * tableZoom;
+    }
+    showImageImportPicker(blob, px, py, lastMouseTableX, lastMouseTableY);
+  });
 }
 
 // =================== Battlemap browser ===================
@@ -2931,10 +4111,68 @@ function gmSetupFlow() {
   gmViewBoardId = STATE.activeBoardId;
   STATE.table = boardById(STATE.activeBoardId).table;
   renderAllGM();
-  setupPeer(STATE.roomCode);   // empty room → host asks for init → we upload STATE
+  // Let the GM name a STABLE room so the group returns to the same persistent table
+  // week to week. Connecting to an existing name makes the DO adopt its saved game.
+  promptRoomName(STATE.roomCode, room => {
+    STATE.roomCode = room;                              // stable name BEFORE the WS connects
+    renderAllGM();
+    setupPeer(STATE.roomCode);                          // existing name → host sends saved 'state'; new name → 'need-init' → we upload STATE
+  });
+}
+
+// GM "Name your room" dialog. `suggested` pre-fills a random slug the GM can accept
+// or replace; recent campaigns offer one-click rejoin. Calls cb(slug) when confirmed.
+function promptRoomName(suggested, cb) {
+  const fromUrl = roomFromUrl();
+  const overlay = el('div', { class:'join-overlay' });
+  const box = el('div', { class:'join-box' });
+  box.appendChild(el('h2', {}, 'Name your room'));
+  box.appendChild(el('p', { style:{ color:'var(--muted)', fontSize:'13px', margin:'4px 0 12px' } },
+    'Pick a stable name so your group returns to the same table next time. Reusing a name restores its saved game.'));
+  const roomI = el('input', { type:'text', placeholder:'room-name', value: fromUrl || suggested || '' });
+  const wrap = (label, child) => { const w=el('div',{class:'jrow'}); w.appendChild(el('label',{},label)); w.appendChild(child); return w; };
+  box.appendChild(wrap('Room name', roomI));
+  const hint = el('div', { style:{ font:'500 11px/1 var(--font-mono)', color:'var(--muted)', minHeight:'12px' } }, '');
+  box.appendChild(hint);
+  const sync = () => { const s = slugifyRoom(roomI.value); hint.textContent = s ? '→ ' + s : 'Enter at least one letter or digit'; };
+  roomI.addEventListener('input', sync); sync();
+  const go = () => {
+    const slug = slugifyRoom(roomI.value) || slugifyRoom(suggested) || randomRoom();
+    addRecentCampaign(slug);
+    overlay.remove();
+    cb(slug);
+  };
+  const btn = el('button', { class:'primary', onclick: go }, 'Create / Join');
+  roomI.addEventListener('keydown', e => { if (e.key === 'Enter') go(); });
+  box.appendChild(btn);
+  // Recent campaigns — per-browser quick-rejoin buttons.
+  const recents = loadRecentCampaigns();
+  if (recents.length) {
+    box.appendChild(el('div', { style:{ font:'500 10px/1 var(--font-mono)', color:'var(--parchment)', letterSpacing:'.12em', textTransform:'uppercase', margin:'14px 0 2px' } }, 'Recent campaigns'));
+    for (const r of recents) {
+      const b = el('button', { style:{ marginTop:'6px', background:'transparent', border:'1px solid var(--line)', textAlign:'left' },
+        onclick: () => { roomI.value = r.room; sync(); } }, r.room);
+      box.appendChild(b);
+    }
+  }
+  overlay.appendChild(box); document.body.appendChild(overlay);
+  setTimeout(() => { roomI.focus(); roomI.select(); }, 0);
+}
+
+// ── Recent campaigns (per-browser quick-rejoin list) ──────────────────────────
+const RECENTS_KEY = 'deckquest-recent-campaigns';
+function loadRecentCampaigns() { try { return JSON.parse(localStorage.getItem(RECENTS_KEY) || '[]'); } catch { return []; } }
+function addRecentCampaign(room) {
+  if (!room) return;
+  try {
+    let list = loadRecentCampaigns().filter(r => r.room !== room);
+    list.unshift({ room, lastPlayed: Date.now() });
+    localStorage.setItem(RECENTS_KEY, JSON.stringify(list.slice(0, 6)));
+  } catch {}
 }
 
 function playerJoinFlow(saved) {
+  const urlRoom = roomFromUrl();   // invite link prefills (and lets us hide) the room field
   const overlay = el('div', { class:'join-overlay' });
   const box = el('div', { class:'join-box' });
   const roomI = el('input', { type:'text', placeholder:'Room code (from GM)' });
@@ -2958,7 +4196,8 @@ function playerJoinFlow(saved) {
   }}, 'Join');
   box.appendChild(el('h2', {}, 'Join Deck Quest'));
   const wrap = (label, child) => { const w=el('div',{class:'jrow'}); w.appendChild(el('label',{},label)); w.appendChild(child); return w; };
-  box.appendChild(wrap('Room code', roomI));
+  const roomRow = wrap('Room code', roomI);
+  box.appendChild(roomRow);
   box.appendChild(wrap('Your name', nameI));
   box.appendChild(wrap('Profile pic (optional)', pfpI));
   box.appendChild(btn);
@@ -2966,6 +4205,11 @@ function playerJoinFlow(saved) {
     roomI.value = saved.room || '';
     nameI.value = saved.name || '';
     btn.textContent = 'Rejoin';
+  }
+  if (urlRoom) {   // invite link — prefill the room and hide the field so players only enter name + pfp
+    roomI.value = urlRoom;
+    roomRow.style.display = 'none';
+    box.insertBefore(el('p', { style:{ color:'var(--muted)', fontSize:'13px', margin:'4px 0 8px' } }, `Joining room "${urlRoom}".`), roomRow);
   }
   overlay.appendChild(box);
   document.body.appendChild(overlay);
@@ -2991,6 +4235,7 @@ async function boot() {
   setupDiceUI();
   setupToolbarUI();
   setupTableInteraction();
+  initImageImport();
   setupFloatingPanels();
   setupAltPreview();
   setupKeybindHelp();
@@ -3020,6 +4265,7 @@ function startDemo() {
   setupDiceUI();
   setupToolbarUI();
   setupTableInteraction();
+  initImageImport();
   setupFloatingPanels();
   setupAltPreview();
   setupKeybindHelp();
@@ -3137,15 +4383,44 @@ function setupLogChatPanel() {
   // Chat send
   const input   = $('#chatInputField');
   const sendBtn = $('#chatSendBtn');
+  const target  = $('#chatTarget');
   const doSend  = () => {
     const text = input?.value?.trim(); if (!text) return;
-    const who   = (ROLE === 'gm') ? (STATE?.hands?.gm?.name || 'GM') : MY_NAME;
-    const color = (ROLE === 'gm') ? (STATE?.hands?.gm?.color || '#f2ca50') : MY_COLOR;
-    sendOp({ type:'send-chat', who, text, color, ts: Date.now() });
+    const to = target?.value || 'all';
+    if (to === 'all') {                                   // public broadcast (unchanged path)
+      const who   = (ROLE === 'gm') ? (STATE?.hands?.gm?.name || 'GM') : MY_NAME;
+      const color = (ROLE === 'gm') ? (STATE?.hands?.gm?.color || '#f2ca50') : MY_COLOR;
+      sendOp({ type:'send-chat', who, text, color, ts: Date.now() });
+    } else {                                              // private whisper (targeted relay)
+      sendOp({ type:'whisper', to, text, ts: Date.now() });
+    }
     if (input) input.value = '';
   };
   if (input)   input.addEventListener('keydown', e => { if (e.key === 'Enter') { e.preventDefault(); doSend(); } });
   if (sendBtn) sendBtn.addEventListener('click', doSend);
+}
+
+// Rebuild the whisper target selector from the live roster: 'All' (public) plus every
+// OTHER connected participant. The GM sees connected players; a player sees GM + other
+// connected players. Options are keyed by SLOT ID (value), labelled by name.
+function renderChatTarget() {
+  const sel = $('#chatTarget'); if (!sel) return;
+  const s = activeState(); const hands = s?.hands || {};
+  const prev = sel.value;
+  const opts = [{ id: 'all', label: 'All' }];
+  if (ROLE !== 'gm') {                                    // players can whisper the GM
+    const gm = hands.gm;
+    if (!gm || gm.connected !== false) opts.push({ id: 'gm', label: (gm?.name || 'GM') });
+  }
+  for (const [id, p] of Object.entries(hands)) {         // other connected players
+    if (id === 'gm' || id === ROLE) continue;
+    if (p.connected === false) continue;
+    opts.push({ id, label: p.name || id });
+  }
+  sel.innerHTML = '';
+  for (const o of opts) sel.appendChild(el('option', { value: o.id }, o.label));
+  // Preserve the prior selection if its target is still present, else fall back to 'All'.
+  sel.value = opts.some(o => o.id === prev) ? prev : 'all';
 }
 
 // =================== Discard pile viewer ===================
@@ -3354,6 +4629,152 @@ function openTokenPanel() {
   setTimeout(() => searchI.focus(), 50);
 }
 
+// GM-only Grid Controls popover. Reads the previewed board's current grid, lets the GM
+// tune the overlay + snap, and fires a `set-board-grid` op (targeting gmViewBoardId) on
+// every change. Players have no controls — they just render whatever the active board carries.
+function openGridControls(anchor) {
+  if (ROLE !== 'gm') return;
+  $$('.grid-popup').forEach(m => m.remove());
+  $$('.ctx-menu').forEach(m => m.remove());
+  const base = (ENGINE.defaultGrid ? ENGINE.defaultGrid() : { enabled:false, type:'square', cellSize:50, color:'#ffffff', opacity:0.25, lineStyle:'solid', snap:false, offsetX:0, offsetY:0 });
+  const g = { ...base, ...(boardById(gmViewBoardId).grid || {}) };
+  const send = () => sendOp({ type:'set-board-grid', boardId: gmViewBoardId, grid: { ...g } });
+
+  const popup = el('div', { class:'ctx-menu grid-popup', style:{ padding:'12px', minWidth:'230px' }});
+  popup.appendChild(el('div', { style:{ fontSize:'12px', fontWeight:'600', color:'#9bb1c9', marginBottom:'10px' }}, 'Grid — this board'));
+  const row = (label, child) => { const r = el('div', { style:{ display:'flex', alignItems:'center', gap:'8px', marginBottom:'8px' }}); r.appendChild(el('span', { style:{ fontSize:'11px', color:'var(--text)', flex:'1' }}, label)); r.appendChild(child); return r; };
+
+  // Enabled
+  const enabledI = el('input', { type:'checkbox' }); enabledI.checked = !!g.enabled;
+  enabledI.addEventListener('change', () => { g.enabled = enabledI.checked; send(); });
+  popup.appendChild(row('Show grid', enabledI));
+
+  // Type (square / hex)
+  const typeSel = el('select', { style:{ fontSize:'11px' }});
+  typeSel.appendChild(el('option', { value:'square' }, 'Square'));
+  typeSel.appendChild(el('option', { value:'hex' }, 'Hex'));
+  typeSel.value = g.type === 'hex' ? 'hex' : 'square';
+  typeSel.addEventListener('change', () => { g.type = typeSel.value; send(); });
+  popup.appendChild(row('Type', typeSel));
+
+  // Cell size (min 20)
+  const cellI = el('input', { type:'number', min:'20', max:'600', step:'5', value: String(g.cellSize), style:{ width:'64px', fontSize:'11px' }});
+  cellI.addEventListener('change', () => { g.cellSize = Math.max(20, parseInt(cellI.value, 10) || 50); cellI.value = String(g.cellSize); send(); });
+  popup.appendChild(row('Cell size', cellI));
+
+  // Color (reuse the pen color-picker pattern)
+  const colorI = el('input', { type:'color', value: g.color || '#ffffff',
+    style:{ width:'32px', height:'24px', padding:'2px', cursor:'pointer', border:'1px solid var(--line)', borderRadius:'var(--radius)', background:'transparent' }});
+  colorI.addEventListener('change', () => { g.color = colorI.value; send(); });
+  popup.appendChild(row('Color', colorI));
+
+  // Opacity (reuse the figurine-opacity slider pattern)
+  const opVal = el('span', { style:{ fontSize:'11px', minWidth:'32px', textAlign:'right' }}, Math.round((g.opacity != null ? g.opacity : 0.25)*100) + '%');
+  const opSlider = el('input', { type:'range', min:'5', max:'100', value: String(Math.round((g.opacity != null ? g.opacity : 0.25)*100)), style:{ flex:'1' }});
+  opSlider.addEventListener('input', () => { opVal.textContent = opSlider.value + '%'; });
+  opSlider.addEventListener('change', () => { g.opacity = parseInt(opSlider.value, 10)/100; send(); });
+  const opRow = el('div', { style:{ display:'flex', alignItems:'center', gap:'8px', marginBottom:'8px' }});
+  opRow.appendChild(el('span', { style:{ fontSize:'11px', color:'var(--text)', flex:'0 0 auto' }}, 'Opacity'));
+  opRow.appendChild(opSlider); opRow.appendChild(opVal);
+  popup.appendChild(opRow);
+
+  // Line style
+  const styleSel = el('select', { style:{ fontSize:'11px' }});
+  styleSel.appendChild(el('option', { value:'solid' }, 'Solid'));
+  styleSel.appendChild(el('option', { value:'dashed' }, 'Dashed'));
+  styleSel.value = g.lineStyle === 'dashed' ? 'dashed' : 'solid';
+  styleSel.addEventListener('change', () => { g.lineStyle = styleSel.value; send(); });
+  popup.appendChild(row('Line style', styleSel));
+
+  // Snap
+  const snapI = el('input', { type:'checkbox' }); snapI.checked = !!g.snap;
+  snapI.addEventListener('change', () => { g.snap = snapI.checked; send(); });
+  popup.appendChild(row('Snap on drop', snapI));
+  popup.appendChild(el('div', { style:{ fontSize:'10px', color:'var(--muted)', marginTop:'2px' }}, 'Hold Ctrl while dragging for free placement.'));
+
+  const closeBtn = el('button', { style:{ marginTop:'8px', width:'100%', fontSize:'11px' }, onclick:() => { popup.remove(); document.removeEventListener('mousedown', onAway, true); }}, 'Close');
+  popup.appendChild(closeBtn);
+
+  // Position above/near the toolbar button, kept in-viewport.
+  document.body.appendChild(popup);
+  const ar = anchor ? anchor.getBoundingClientRect() : { left: 100, top: 100, bottom: 120 };
+  let left = ar.left, top = ar.bottom + 6;
+  const pr = popup.getBoundingClientRect();
+  if (top + pr.height > window.innerHeight) top = Math.max(4, ar.top - pr.height - 6);
+  if (left + pr.width > window.innerWidth) left = Math.max(4, window.innerWidth - pr.width - 4);
+  popup.style.left = left + 'px'; popup.style.top = top + 'px';
+
+  const onAway = e => { if (!popup.contains(e.target) && e.target !== anchor && !anchor.contains(e.target)) { popup.remove(); document.removeEventListener('mousedown', onAway, true); } };
+  document.addEventListener('mousedown', onAway, true);
+}
+
+// Fog-of-war controls popup (GM-only). Picks the paint mode (Cut/Hide), shape
+// (brush/rect) and brush size, plus the one-click Fill/Undo/Clear ops. Targets the GM's
+// previewed board (gmViewBoardId). Mirrors openGridControls' popup style.
+function openFogControls(anchor) {
+  if (ROLE !== 'gm') return;
+  $$('.fog-popup').forEach(m => m.remove());
+  $$('.grid-popup').forEach(m => m.remove());
+  $$('.ctx-menu').forEach(m => m.remove());
+  const popup = el('div', { class:'ctx-menu fog-popup', style:{ padding:'12px', minWidth:'230px' }});
+  popup.appendChild(el('div', { style:{ fontSize:'12px', fontWeight:'600', color:'#9bb1c9', marginBottom:'10px' }}, 'Fog of war — this board'));
+  const row = (label, child) => { const r = el('div', { style:{ display:'flex', alignItems:'center', gap:'8px', marginBottom:'8px' }}); r.appendChild(el('span', { style:{ fontSize:'11px', color:'var(--text)', flex:'1' }}, label)); r.appendChild(child); return r; };
+
+  // Mode: Cut (reveal) vs Hide (re-cover). A segmented pair of buttons.
+  const modeWrap = el('div', { style:{ display:'flex', gap:'6px' }});
+  const cutBtn  = el('button', { style:{ flex:'1', fontSize:'11px' }}, 'Cut');
+  const hideBtn = el('button', { style:{ flex:'1', fontSize:'11px' }}, 'Hide');
+  const syncMode = () => { cutBtn.classList.toggle('active', fogMode === 'cut'); hideBtn.classList.toggle('active', fogMode === 'hide'); };
+  cutBtn.addEventListener('click',  () => { fogMode = 'cut';  syncMode(); setTool('fog'); });
+  hideBtn.addEventListener('click', () => { fogMode = 'hide'; syncMode(); setTool('fog'); });
+  modeWrap.appendChild(cutBtn); modeWrap.appendChild(hideBtn); syncMode();
+  popup.appendChild(row('Paint', modeWrap));
+
+  // Shape: brush vs rect.
+  const shapeSel = el('select', { style:{ fontSize:'11px' }});
+  shapeSel.appendChild(el('option', { value:'brush' }, 'Brush'));
+  shapeSel.appendChild(el('option', { value:'rect' }, 'Rectangle'));
+  shapeSel.value = fogShapeKind;
+  shapeSel.addEventListener('change', () => { fogShapeKind = shapeSel.value; setTool('fog'); });
+  popup.appendChild(row('Shape', shapeSel));
+
+  // Brush size slider.
+  const sizeVal = el('span', { style:{ fontSize:'11px', minWidth:'40px', textAlign:'right' }}, String(fogBrushSize));
+  const sizeSlider = el('input', { type:'range', min:'20', max:'400', step:'10', value: String(fogBrushSize), style:{ flex:'1' }});
+  sizeSlider.addEventListener('input',  () => { sizeVal.textContent = sizeSlider.value; });
+  sizeSlider.addEventListener('change', () => { fogBrushSize = parseInt(sizeSlider.value, 10) || 120; });
+  const sizeRow = el('div', { style:{ display:'flex', alignItems:'center', gap:'8px', marginBottom:'8px' }});
+  sizeRow.appendChild(el('span', { style:{ fontSize:'11px', color:'var(--text)', flex:'0 0 auto' }}, 'Brush size'));
+  sizeRow.appendChild(sizeSlider); sizeRow.appendChild(sizeVal);
+  popup.appendChild(sizeRow);
+
+  // Action buttons: Fill / Undo / Clear (all target the previewed board).
+  const actWrap = el('div', { style:{ display:'flex', gap:'6px', marginTop:'4px' }});
+  const fillBtn  = el('button', { style:{ flex:'1', fontSize:'11px' }, title:'Cover the whole board with fog' }, 'Fill');
+  const undoBtn  = el('button', { style:{ flex:'1', fontSize:'11px' }, title:'Undo the last cut/hide' }, 'Undo');
+  const clearBtn = el('button', { style:{ flex:'1', fontSize:'11px' }, title:'Remove all fog' }, 'Clear');
+  fillBtn.addEventListener('click',  () => sendOp({ type:'fog-fill',  boardId: gmViewBoardId }));
+  undoBtn.addEventListener('click',  () => sendOp({ type:'fog-undo',  boardId: gmViewBoardId }));
+  clearBtn.addEventListener('click', () => sendOp({ type:'fog-clear', boardId: gmViewBoardId }));
+  actWrap.appendChild(fillBtn); actWrap.appendChild(undoBtn); actWrap.appendChild(clearBtn);
+  popup.appendChild(actWrap);
+  popup.appendChild(el('div', { style:{ fontSize:'10px', color:'var(--muted)', marginTop:'8px' }}, 'Fill, then Cut to reveal as the party explores. You see fog at 50%; players see it opaque.'));
+
+  const closeBtn = el('button', { style:{ marginTop:'8px', width:'100%', fontSize:'11px' }, onclick:() => { popup.remove(); document.removeEventListener('mousedown', onAway, true); }}, 'Close');
+  popup.appendChild(closeBtn);
+
+  document.body.appendChild(popup);
+  const ar = anchor ? anchor.getBoundingClientRect() : { left: 100, top: 100, bottom: 120 };
+  let left = ar.left, top = ar.bottom + 6;
+  const pr = popup.getBoundingClientRect();
+  if (top + pr.height > window.innerHeight) top = Math.max(4, ar.top - pr.height - 6);
+  if (left + pr.width > window.innerWidth) left = Math.max(4, window.innerWidth - pr.width - 4);
+  popup.style.left = left + 'px'; popup.style.top = top + 'px';
+
+  const onAway = e => { if (!popup.contains(e.target) && e.target !== anchor && !anchor.contains(e.target)) { popup.remove(); document.removeEventListener('mousedown', onAway, true); } };
+  document.addEventListener('mousedown', onAway, true);
+}
+
 function setupToolbarUI() {
   const tb = $('#toolbar'); if (!tb) return;
   // Draw tools
@@ -3363,6 +4784,39 @@ function setupToolbarUI() {
     b.appendChild(icon(TOOL_ICON[t]));
     tb.appendChild(b);
   }
+  // Ping (laser pointer) — everyone may ping (open-control model). Click/drag to drop
+  // markers; or hold Q anywhere for a quick ping without switching tools.
+  const pingBtn = el('button', { class:'tool-btn', 'data-tool':'ping', title:'Ping / laser pointer — click the table to ping (or hold Q)', onclick:() => setTool(currentTool === 'ping' ? 'pointer' : 'ping') });
+  pingBtn.appendChild(icon('ping'));
+  tb.appendChild(pingBtn);
+  // Ruler / measure (M) — everyone may measure (open-control). Drag on the table to draw
+  // an A→B line with a live distance label; right-click cycles the metric. Pure relay.
+  const METRIC_NAME = { euclid:'Euclidean', cheby:'Chebyshev', manhattan:'Manhattan' };
+  const rulerBtn = el('button', { class:'tool-btn', 'data-tool':'ruler', title:'Measure / ruler (M) — drag to measure · right-click to change metric', onclick:() => setTool(currentTool === 'ruler' ? 'pointer' : 'ruler') });
+  rulerBtn.appendChild(icon('ruler'));
+  rulerBtn.addEventListener('contextmenu', e => {
+    e.preventDefault();
+    const order = ['euclid','cheby','manhattan'];
+    rulerMetric = order[(order.indexOf(rulerMetric) + 1) % order.length];
+    rulerBtn.title = 'Measure / ruler (M) — ' + METRIC_NAME[rulerMetric] + ' · drag to measure · right-click to change metric';
+  });
+  tb.appendChild(rulerBtn);
+  // AoE / spell-area templates (cone, circle, line, cube) — everyone may place (open-control).
+  // The button activates the placement tool; right-click cycles the shape it drops. The
+  // shape also shows in the title so the current pick is visible.
+  const aoeBtn = el('button', { class:'tool-btn', 'data-tool':'template', onclick:() => setTool(currentTool === 'template' ? 'pointer' : 'template') });
+  aoeBtn.appendChild(icon('aoe'));
+  const _aoeTitle = () => 'AoE template — ' + (TPL_SHAPES.find(([k]) => k === templateShape)?.[1] || templateShape) + ' · click-drag to place · right-click to change shape';
+  aoeBtn.title = _aoeTitle();
+  aoeBtn.addEventListener('contextmenu', e => {
+    e.preventDefault();
+    // Cycle shape, or pop a picker — a small menu is clearer than blind cycling.
+    showMenu(TPL_SHAPES.map(([k, label]) => ({
+      label: (templateShape === k ? '✓ ' : '  ') + label,
+      action: () => { templateShape = k; aoeBtn.title = _aoeTitle(); setTool('template'); },
+    })), e.clientX, e.clientY);
+  });
+  tb.appendChild(aoeBtn);
   // Color picker (same height as tool buttons)
   const colorI = el('input', { type:'color', value: currentColor, title:'Pen color',
     style:{ width:'32px', height:'32px', padding:'2px', cursor:'pointer', border:'1px solid var(--line)', borderRadius:'var(--radius)', background:'transparent', verticalAlign:'middle' } });
@@ -3409,6 +4863,18 @@ function setupToolbarUI() {
     zoneBtn.appendChild(icon('zone'));
     zoneBtn.appendChild(el('span', {}, 'Spawn'));
     tb.appendChild(zoneBtn);
+    const gridBtn = el('button', { class:'tool-btn', title:'Grid overlay & snap-to-grid for this board' });
+    gridBtn.appendChild(icon('grid'));
+    gridBtn.appendChild(el('span', {}, 'Grid'));
+    gridBtn.addEventListener('click', () => openGridControls(gridBtn));
+    tb.appendChild(gridBtn);
+    // Fog of war (GM-only authoring). The button opens the fog controls popup AND arms the
+    // fog paint tool; the popup picks Cut/Hide, brush/rect, brush size, and Fill/Undo/Clear.
+    const fogBtn = el('button', { class:'tool-btn', 'data-tool':'fog', title:'Fog of war — hide the board from players, then reveal as they explore' });
+    fogBtn.appendChild(icon('fog'));
+    fogBtn.appendChild(el('span', {}, 'Fog'));
+    fogBtn.addEventListener('click', () => { setTool('fog'); openFogControls(fogBtn); });
+    tb.appendChild(fogBtn);
     const mapBtn = el('label', { class:'tool-btn', title:'Upload a battle map' });
     mapBtn.appendChild(icon('map'));
     mapBtn.appendChild(el('span', {}, 'Map'));
@@ -3486,8 +4952,27 @@ function setupFloatingPanels() {
 }
 
 
+// Resolve a slot id ('gm' / 'playerN') to a display name via the live roster. Whisper
+// identity is keyed by slot id (never by ambiguous display name) — we only map id→name
+// at render time. Falls back to 'GM'/the raw id if the roster lacks the slot.
+function whisperName(id) {
+  if (id === 'gm') return (activeState()?.hands?.gm?.name) || 'GM';
+  return (activeState()?.hands?.[id]?.name) || id;
+}
+
+// A whisper arrived from the host (delivered to recipient, echoed to sender, copied to GM).
+// Append to the local buffer and re-render. The server echoes our own outgoing whispers,
+// so we never optimistically add — this one path populates the panel for both directions.
+function receiveWhisper(d) {
+  _whispers.push({ from: d.from, to: d.to, text: d.text, color: d.color, name: d.name, ts: d.ts || Date.now() });
+  if (_whispers.length > 200) _whispers.splice(0, _whispers.length - 200);
+  if (!_chatPaneActive) { _chatUnread += 1; _updateChatBadge(); }
+  renderChatPanel();
+}
+
 function renderChatPanel() {
   const s = activeState(); if (!s) return;
+  renderChatTarget();   // keep the whisper target selector in sync with the live roster
   const container = $('#chatMessages'); if (!container) return;
   const msgs = s.chat || [];
   if (!_chatPaneActive && msgs.length > _lastChatCount) {
@@ -3497,14 +4982,39 @@ function renderChatPanel() {
   _lastChatCount = msgs.length;
   const myWho = (ROLE === 'gm') ? (s.hands?.gm?.name || 'GM') : MY_NAME;
   container.innerHTML = '';
-  for (const msg of msgs) {
-    const isMe = msg.who === myWho;
-    const row = el('div', { class: 'chat-msg' + (isMe ? ' chat-msg-me' : '') });
-    const who = el('span', { class: 'chat-msg-who', style: { color: msg.color || 'var(--accent)' } }, msg.who + ': ');
-    const text = el('span', { class: 'chat-msg-text' }, msg.text);
-    row.appendChild(who);
-    row.appendChild(text);
-    container.appendChild(row);
+  // Merge public messages and private whispers into one timeline, ordered by ts. Public
+  // entries are tagged kind:'chat', whispers kind:'whisper' (slot-id identity preserved).
+  const items = [
+    ...msgs.map(m => ({ kind: 'chat', ts: m.ts || 0, msg: m })),
+    ..._whispers.map(w => ({ kind: 'whisper', ts: w.ts || 0, w })),
+  ].sort((a, b) => (a.ts - b.ts));
+  for (const it of items) {
+    if (it.kind === 'chat') {
+      const msg = it.msg;
+      const isMe = msg.who === myWho;
+      const row = el('div', { class: 'chat-msg' + (isMe ? ' chat-msg-me' : '') });
+      const who = el('span', { class: 'chat-msg-who', style: { color: msg.color || 'var(--accent)' } }, msg.who + ': ');
+      const text = el('span', { class: 'chat-msg-text' }, msg.text);
+      row.appendChild(who);
+      row.appendChild(text);
+      container.appendChild(row);
+    } else {
+      // Whisper: attribution is by slot id (from/to), NOT display name. We are the sender
+      // when from===ROLE; otherwise we received it (or are the GM seeing a copy).
+      const w = it.w;
+      const outgoing = w.from === ROLE;
+      const tag = outgoing
+        ? '(whisper to ' + whisperName(w.to) + ')'
+        : (w.to === ROLE
+            ? '(whisper from ' + whisperName(w.from) + ')'
+            : '(whisper ' + whisperName(w.from) + ' → ' + whisperName(w.to) + ')');  // GM moderation copy
+      const row = el('div', { class: 'chat-msg chat-whisper' + (outgoing ? ' chat-msg-me' : '') });
+      const who = el('span', { class: 'chat-msg-who chat-whisper-tag' }, tag + ' ');
+      const text = el('span', { class: 'chat-msg-text' }, w.text);
+      row.appendChild(who);
+      row.appendChild(text);
+      container.appendChild(row);
+    }
   }
   container.scrollTop = container.scrollHeight;
 }
@@ -3559,11 +5069,32 @@ function showTokenDetailPopup(f, e) {
 
 window.addEventListener('DOMContentLoaded', boot);
 
+// Copy a shareable invite for the current room. Over http(s) we build a player-page
+// link with a #room=<name> hash (never hits the Worker as a path); otherwise we copy
+// the room name with a short instruction (file:// players open their own player.html).
+window._copyInvite = async () => {
+  const room = MY_ROOM || STATE?.roomCode;
+  if (!room) return;
+  let text;
+  if (location.protocol === 'http:' || location.protocol === 'https:') {
+    text = location.origin + location.pathname.replace('gm', 'player') + '#room=' + room;
+  } else {
+    text = `Room: ${room} — open player.html and enter this room code.`;
+  }
+  try {
+    await navigator.clipboard.writeText(text);
+    toast('Invite copied');
+  } catch {
+    // Clipboard API unavailable (e.g. insecure context) — fall back to a prompt the GM can copy from.
+    try { window.prompt('Copy this invite:', text); } catch { toast(text); }
+  }
+};
+
 // Save/load wiring (called from buttons in template)
 window._saveSession = downloadSession;
 window._loadSession = file => loadSessionFile(file);
 window._newSession = () => {
-  if (_dirty && !confirm('Start a new session? Unsaved changes will be lost.')) return;
+  if (!confirm("Start a new session? This clears the current room's table for everyone.")) return;
   // Clear optimistic/queued state so old strokes don't ghost onto the new board and
   // stale queued ops aren't flushed into the new room.
   pendingDrawings.length = 0;
@@ -3571,10 +5102,13 @@ window._newSession = () => {
   _pendingOps.length = 0;
   // Player slots are allocated dynamically as players join — no upfront count.
   MY_ID = 'gm';
+  const room = MY_ROOM || STATE?.roomCode;   // KEEP the same room name so continuity holds
   STATE = ENGINE.newState(CARD_IDS_BY_TYPE);
+  STATE.roomCode = room;       // newState() minted a random roomCode — override back to the stable name
   gmViewBoardId = STATE.activeBoardId;
   STATE.table = boardById(STATE.activeBoardId).table;
   renderAllGM();
-  setupPeer(STATE.roomCode);   // new roomCode → fresh empty room
+  // Same persistent DO already holds last session's state → force a re-seed instead of reconnecting.
+  if (!sendToServer({ type:'reset-room', state: STATE })) setupPeer(STATE.roomCode);
   _dirty = false;
 };
