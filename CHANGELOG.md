@@ -4,6 +4,14 @@ All notable changes to Deck Quest VTT. Newest first. Versions are GitHub release
 (`gm.html` / `player.html` are attached to each); the Cloudflare Worker in `relay-cf/`
 is redeployed whenever the host protocol changes.
 
+## v1.3.1 — Fix laser-pointer over the relay (2026-06-14)
+
+Patch for v1.3.0. The laser-pointer (ping) reused the WebSocket message type `ping`, which the
+server's heartbeat handler intercepts (it replies `pong` and returns), so laser pings never reached
+other clients. Renamed the laser message to `laser`; the heartbeat is unchanged. Found via a live
+two-client relay test. The Cloudflare Worker was redeployed in lockstep — **re-download `gm.html` /
+`player.html` to get the fix** (the v1.3.0 download still sends the old message type).
+
 ## v1.3.0 — Owlbear-inspired tactical & QoL features (2026-06-14)
 
 A large feature drop: 11 features sourced from an Owlbear Rodeo research audit, then gap-analyzed
