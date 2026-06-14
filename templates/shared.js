@@ -1877,7 +1877,9 @@ function sendPing() {
   if (window.DEMO) { showPing(x, y, MY_COLOR, MY_NAME, window._pendingPfpHash); return; }
   // The relay echoes ping-show to everyone EXCEPT the sender, so render our own ping locally too.
   showPing(x, y, MY_COLOR, MY_NAME, window._pendingPfpHash);
-  sendToServer({ type:'ping', x, y, boardId });
+  // NB: type is 'laser', NOT 'ping' — 'ping' is the heartbeat (server replies 'pong' and returns),
+  // which would otherwise swallow the laser-pointer message before it reaches the fanout branch.
+  sendToServer({ type:'laser', x, y, boardId });
 }
 
 // ---- Ruler / measure tool ----

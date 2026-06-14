@@ -150,7 +150,7 @@ export class Room extends DurableObject {
       return;
     }
 
-    if (d.type === "ping") {                           // ephemeral laser-pointer marker (not persisted)
+    if (d.type === "laser") {                          // ephemeral laser-pointer marker (NOT 'ping' — that's the heartbeat at the top, which returns early)
       const who = this.clientId(this.att(ws)); const p = this.game.hands[who] || {};
       this.fanout({ type: "ping-show", who, x: d.x, y: d.y, color: p.color || "#fff", name: p.name || who, pfpHash: p.pfpHash, boardId: d.boardId }, ws);
       return;
