@@ -31,12 +31,17 @@ export const NOUN = ['falcon','dragon','wolf','tiger','phoenix','kraken','griffi
 export const TABLE_OPS = new Set(['draw','spawn-card','discard-send','flip-card','move-table-card',
   'lock-table-card','transfer-card','add-figurine','move-figurine','remove-figurine','duplicate-figurine',
   'clear-drawings','clear-my-drawings','undo-drawing','add-drawing','remove-drawing','set-group',
-  'set-figurine-vitals','toggle-effect','set-figurine-label']);
+  'set-figurine-vitals','toggle-effect','set-figurine-label','set-figurine-hidden','set-board-grid',
+  'add-template','move-template','update-template','remove-template','clear-templates',
+  'fog-fill','fog-cut','fog-hide','fog-undo','fog-clear',
+  'init-add','init-remove','init-set-value','init-sort','init-advance','init-prev','init-reset','init-toggle-dead']);
 
 // Ops only the GM may issue.
 export const GM_ONLY_OPS = new Set(['draw','spawn-card','discard-send','shuffle-deck','lock-table-card',
   'clear-drawings','set-gm-notes','board-add','board-rename','board-duplicate','board-delete','board-activate',
-  'remove-slot']);
+  'remove-slot','set-figurine-hidden','set-board-grid','clear-templates',
+  'fog-fill','fog-cut','fog-hide','fog-undo','fog-clear',
+  'init-add','init-remove','init-set-value','init-sort','init-advance','init-prev','init-reset','init-toggle-dead']);
 // Ops that edit a specific owner's sheet — a player may only target their own.
 export const OWNER_SCOPED_OPS = new Set(['set-player-field','add-inventory','remove-inventory','set-pfp']);
 
@@ -49,6 +54,19 @@ export function randomRoom() {
   return ADJ[Math.floor(Math.random()*ADJ.length)] + '-' + NOUN[Math.floor(Math.random()*NOUN.length)] + '-' + Math.floor(Math.random()*100);
 }
 export function boardById(state, id) { return (state.boards || []).find(b => b.id === id) || state.boards[0]; }
+// Default per-board grid config. Grid is OFF by default so theatre-of-mind boards stay gridless.
+export function defaultGrid() {
+  return { enabled:false, type:'square', cellSize:50, color:'#ffffff', opacity:0.25, lineStyle:'solid', snap:false, offsetX:0, offsetY:0 };
+}
+// Default per-board initiative tracker. Empty list, first turn, round 1.
+export function defaultInitiative() {
+  return { active:0, round:1, entries:[] };
+}
+// Default per-board fog-of-war layer. `filled` = whole board starts covered; `shapes`
+// = ordered reveal/hide cuts replayed in order (so cut-then-re-hide composes correctly).
+export function defaultFog() {
+  return { filled:false, shapes:[] };
+}
 function nextZ(state) { state._z = (state._z || 0) + 1; return state._z; }
 function now() { return Date.now(); }
 function pushLog(state, who, text, kind = 'info', color) {
@@ -64,7 +82,7 @@ export function newState(cardsByType) {
   const decks = {}; const discards = {};
   for (const t of DECK_TYPES) { decks[t] = shuffle([...(cardsByType?.[t] || [])]); discards[t] = []; }
   const hands = { gm: { name: 'GM', color: '#3b82f6', hand: [] } };  // GM only; player slots are allocated dynamically via ensureSlot
-  const mainBoard = { id: uid(), name: 'Main', table: { cards: [], figurines: [], drawings: [] } };
+  const mainBoard = { id: uid(), name: 'Main', table: { cards: [], figurines: [], drawings: [], templates: [], initiative: defaultInitiative(), fog: defaultFog() }, grid: defaultGrid() };
   return {
     roomCode: randomRoom(), playerCount: 0,
     decks, discards,
@@ -86,6 +104,8 @@ export function migrateState(state, typeOf) {
     const table = state.table || { cards: [], figurines: [], drawings: [] };
     state.boards = [{ id: uid(), name: 'Main', table }];
   }
+  // Backfill a default grid + empty templates array + initiative tracker on any board predating those features.
+  for (const b of state.boards) { b.grid ??= defaultGrid(); b.table.templates ??= []; b.table.initiative ??= defaultInitiative(); b.table.fog ??= defaultFog(); }
   if (!state.activeBoardId) state.activeBoardId = state.boards[0].id;
   // Derive playerCount for OLD fixed-slot saves (which already carry player1..N hands).
   if (state.playerCount === undefined || state.playerCount === null)
@@ -341,16 +361,169 @@ export function applyOp(state, op, by, ctx = {}) {
       if (op.flipV != null) f.flipV = op.flipV;
       if (op.label != null) f.label = op.label;
       if (op.showName != null) f.showName = op.showName;
+      if (op.aura !== undefined) f.aura = op.aura;
       if (op.bringToFront) f.z = nextZ(state);
       else if (op.sendToBack) f.z = Math.min(...tbl.figurines.map(g => g.z||1)) - 1;
       const isDrag = op.x != null && op.y != null && op.w == null && op.h == null && op.rot == null &&
         op.locked == null && op.opacity == null && op.flipH == null && op.flipV == null &&
-        op.label == null && op.showName == null && !op.bringToFront && !op.sendToBack;
+        op.label == null && op.showName == null && op.aura === undefined && !op.bringToFront && !op.sendToBack;
       if (isDrag) return { movePatch: { kind:'figurine', instId:op.instId, x:f.x, y:f.y, z:f.z, boardId: resolvedBoardId(state, op, by) } };
       return {};
     }
-    case 'remove-figurine': { tbl.figurines = tbl.figurines.filter(f => f.instId !== op.instId); return {}; }
+    case 'remove-figurine': {
+      tbl.figurines = tbl.figurines.filter(f => f.instId !== op.instId);
+      // Drop any initiative rows linked to this token, keeping the highlight on the
+      // same combatant (each removed row before `active` shifts it down by one).
+      const ini = tbl.initiative;
+      if (ini && ini.entries.some(e => e.instId === op.instId)) {
+        for (let i = ini.entries.length - 1; i >= 0; i--) {
+          if (ini.entries[i].instId === op.instId) {
+            ini.entries.splice(i, 1);
+            if (i < ini.active) ini.active--;
+          }
+        }
+        ini.active = ini.entries.length ? Math.max(0, Math.min(ini.active, ini.entries.length - 1)) : 0;
+      }
+      return {};
+    }
     case 'duplicate-figurine': { const f = tbl.figurines.find(f => f.instId === op.instId); if (!f) return { rejected: true }; tbl.figurines.push({ ...f, instId: uid(), x: f.x + 30, y: f.y + 30, z: nextZ(state) }); return {}; }
+
+    // ── Initiative / turn-order tracker (GM-only). Stored at tbl.initiative; rides
+    // the ...liveTable spread in viewFor so players see it read-only. All return {}
+    // (full rebroadcast — low-frequency ops). Rows are keyed by a stable `id`, NOT
+    // the array index, so re-sorting never desyncs whose turn it is.
+    case 'init-add': {
+      const ini = tbl.initiative ||= defaultInitiative();
+      ini.entries.push({ id: uid(), instId: op.instId ?? null, name: op.name || 'Combatant', value: Number(op.value) || 0, dead: false });
+      return {};
+    }
+    case 'init-remove': {
+      const ini = tbl.initiative ||= defaultInitiative();
+      const i = ini.entries.findIndex(e => e.id === op.id); if (i < 0) return { rejected: true };
+      ini.entries.splice(i, 1);
+      if (i < ini.active) ini.active--;                  // keep highlight on the same combatant
+      ini.active = ini.entries.length ? Math.max(0, Math.min(ini.active, ini.entries.length - 1)) : 0;
+      return {};
+    }
+    case 'init-set-value': {
+      const ini = tbl.initiative ||= defaultInitiative();
+      const e = ini.entries.find(e => e.id === op.id); if (!e) return { rejected: true };
+      e.value = Number(op.value) || 0;
+      return {};
+    }
+    case 'init-sort': {
+      const ini = tbl.initiative ||= defaultInitiative();
+      // Pin the active combatant across the sort: capture its id, sort stably by
+      // value DESC, then re-find that id's new index so the turn doesn't jump.
+      const activeId = ini.entries[ini.active]?.id ?? null;
+      // Decorate-sort-undecorate for a guaranteed-stable sort (value DESC, original
+      // order on ties) regardless of the host engine's Array.sort stability.
+      ini.entries = ini.entries
+        .map((e, i) => ({ e, i }))
+        .sort((a, b) => (b.e.value - a.e.value) || (a.i - b.i))
+        .map(x => x.e);
+      if (activeId != null) { const ni = ini.entries.findIndex(e => e.id === activeId); ini.active = ni >= 0 ? ni : 0; }
+      else ini.active = 0;
+      return {};
+    }
+    case 'init-advance': {
+      const ini = tbl.initiative ||= defaultInitiative();
+      if (!ini.entries.length) return {};
+      ini.active = (ini.active + 1) % ini.entries.length;
+      if (ini.active === 0) ini.round++;                 // wrapped to the top → new round
+      return {};
+    }
+    case 'init-prev': {
+      const ini = tbl.initiative ||= defaultInitiative();
+      if (!ini.entries.length) return {};
+      const wrapped = ini.active === 0;
+      ini.active = (ini.active - 1 + ini.entries.length) % ini.entries.length;
+      if (wrapped) ini.round = Math.max(1, ini.round - 1);
+      return {};
+    }
+    case 'init-reset': {
+      tbl.initiative = defaultInitiative();              // full clear: entries=[], active=0, round=1
+      return {};
+    }
+    case 'init-toggle-dead': {
+      const ini = tbl.initiative ||= defaultInitiative();
+      const e = ini.entries.find(e => e.id === op.id); if (!e) return { rejected: true };
+      e.dead = !e.dead;
+      return {};
+    }
+
+    // ── AoE / spell-area templates (cone, circle, line, cube). Free-placed, aimed,
+    // translucent area shapes. Players may place/move/aim/recolor UNLOCKED ones (open
+    // control); only clear-templates (clear ALL) is GM-only. Mirror the figurine ops.
+    case 'add-template': {
+      tbl.templates = tbl.templates || [];
+      tbl.templates.push({
+        instId: uid(), shape: op.shape || 'circle',
+        x: op.x || 0, y: op.y || 0, rot: op.rot || 0,
+        size: op.size != null ? op.size : 3, width: op.width != null ? op.width : 1,
+        color: op.color || '#3b82f6', by: by, locked: false, z: nextZ(state),
+      });
+      return {};
+    }
+    case 'move-template': {
+      const t = (tbl.templates || []).find(t => t.instId === op.instId); if (!t) return { rejected: true };
+      if (t.locked) return { rejected: true };
+      if (op.x != null) t.x = op.x; if (op.y != null) t.y = op.y;
+      if (op.bringToFront) t.z = nextZ(state);
+      else if (op.sendToBack) t.z = Math.min(...tbl.templates.map(g => g.z || 1)) - 1;
+      const isDrag = op.x != null && op.y != null && !op.bringToFront && !op.sendToBack;
+      if (isDrag) return { movePatch: { kind:'template', instId: op.instId, x: t.x, y: t.y, z: t.z, boardId: resolvedBoardId(state, op, by) } };
+      return {};
+    }
+    case 'update-template': {
+      const t = (tbl.templates || []).find(t => t.instId === op.instId); if (!t) return { rejected: true };
+      // Guard locked — but always allow toggling lock (so a player can unlock their own).
+      if (t.locked && op.locked == null) return { rejected: true };
+      const patch = { kind:'set-template', boardId: resolvedBoardId(state, op, by), instId: op.instId };
+      if (op.rot   !== undefined) { t.rot   = op.rot;   patch.rot   = op.rot; }
+      if (op.size  !== undefined) { t.size  = op.size;  patch.size  = op.size; }
+      if (op.width !== undefined) { t.width = op.width; patch.width = op.width; }
+      if (op.color !== undefined) { t.color = op.color; patch.color = op.color; }
+      if (op.locked !== undefined) { t.locked = op.locked; patch.locked = op.locked; }
+      return { patch };
+    }
+    case 'remove-template': { tbl.templates = (tbl.templates || []).filter(t => t.instId !== op.instId); return {}; }
+    case 'clear-templates': { tbl.templates = []; pushLog(state, 'GM', 'cleared templates', 'sys'); return {}; }
+
+    // ── Fog of war (GM-only authoring; rides ...liveTable into the player view so their
+    // client can render the OPAQUE fog — the GM-vs-player difference is render OPACITY,
+    // decided client-side, NOT a viewFor filter). State at tbl.fog = { filled, shapes:[] };
+    // shapes are an ORDERED list: reveal = carve fog away, hide = paint fog back. Mirrors
+    // the drawing system: fog-cut/fog-hide return an incremental fog-add patch (so cuts
+    // reach all clients without a full rebroadcast); fill sends the whole small fog object.
+    case 'fog-fill': {
+      tbl.fog ||= defaultFog();
+      tbl.fog.filled = true;
+      pushLog(state, 'GM', 'filled the board with fog', 'sys');
+      return { patch: { kind:'fog-set', boardId: resolvedBoardId(state, op, by), fog: tbl.fog } };
+    }
+    case 'fog-cut': {
+      tbl.fog ||= defaultFog();
+      const shape = { id: uid(), mode:'reveal', ...op.shape };
+      tbl.fog.shapes.push(shape);
+      return { patch: { kind:'fog-add', boardId: resolvedBoardId(state, op, by), shape } };
+    }
+    case 'fog-hide': {
+      tbl.fog ||= defaultFog();
+      const shape = { id: uid(), mode:'hide', ...op.shape };
+      tbl.fog.shapes.push(shape);
+      return { patch: { kind:'fog-add', boardId: resolvedBoardId(state, op, by), shape } };
+    }
+    case 'fog-undo': {
+      tbl.fog ||= defaultFog();
+      tbl.fog.shapes.pop();   // drop the most recent cut/hide (full rebroadcast — simplest correct undo)
+      return {};
+    }
+    case 'fog-clear': {
+      tbl.fog = defaultFog();   // { filled:false, shapes:[] }
+      pushLog(state, 'GM', 'cleared fog', 'sys');
+      return {};
+    }
 
     case 'clear-drawings': { tbl.drawings = []; pushLog(state, 'GM', 'cleared drawings', 'sys'); return {}; }
     case 'clear-my-drawings': { tbl.drawings = tbl.drawings.filter(d => d.by !== op.by); return {}; }
@@ -387,12 +560,31 @@ export function applyOp(state, op, by, ctx = {}) {
       if (op.armor !== undefined) { f.armor = op.armor; patch.armor = op.armor; }
       return { patch };
     }
+    case 'set-figurine-hidden': {  // GM-only: stage a token only the GM can see (full rebroadcast, never a patch)
+      const f = tbl.figurines.find(x => x.instId === op.instId); if (!f) return { rejected: true };
+      f.hidden = !!op.hidden;
+      return {};   // {} → full broadcastState so players' viewFor simply omits the figurine (no patch → no leak)
+    }
 
     case 'send-chat': {
       if (!state.chat) state.chat = [];
       state.chat.push({ who: op.who, text: op.text, color: op.color || 'var(--text)', ts: op.ts || now() });
       if (state.chat.length > 200) state.chat.splice(0, state.chat.length - 200);
       return {};
+    }
+    // Private 1:1 message — TARGETED RELAY ONLY. Never pushed to state.chat, never in
+    // viewFor, never persisted. `from` is the SERVER-AUTHENTICATED `by` (not trusted from
+    // the client). The host routes { whisper } to the two participants (+ GM for moderation).
+    case 'whisper': {
+      if (op.to !== 'gm' && !state.hands[op.to]) return { rejected: true };  // target must be 'gm' or an existing slot
+      return { whisper: {
+        from: by,
+        to: op.to,
+        text: String(op.text || '').slice(0, 2000),
+        color: (state.hands[by]?.color) || '#fff',
+        name:  (state.hands[by]?.name)  || by,
+        ts: op.ts || ctx.now || now(),
+      } };
     }
     case 'log': { pushLog(state, op.who, op.text, op.kind || 'info', op.color); return {}; }
     case 'set-gm-notes': { state.gmNotes = op.text || ''; return { gmOnly: true }; }
@@ -406,16 +598,32 @@ export function applyOp(state, op, by, ctx = {}) {
       return {};
     }
 
+    // GM-only: replace this board's grid config (square/hex overlay + snap settings).
+    // Full rebroadcast ({}) — grid edits are infrequent, so no targeted patch is needed.
+    case 'set-board-grid': {
+      const board = boardById(state, resolvedBoardId(state, op, by));
+      board.grid = { ...defaultGrid(), ...(op.grid || {}) };
+      return {};
+    }
+
     // ── Board management (GM-only; the GM supplies board ids) ──────────────────
-    case 'board-add': { state.boards.push({ id: op.id || uid(), name: op.name || ('Board ' + (state.boards.length + 1)), table: { cards: [], figurines: [], drawings: [] } }); return {}; }
+    case 'board-add': { state.boards.push({ id: op.id || uid(), name: op.name || ('Board ' + (state.boards.length + 1)), table: { cards: [], figurines: [], drawings: [], templates: [], initiative: defaultInitiative(), fog: defaultFog() }, grid: defaultGrid() }); return {}; }
     case 'board-rename': { const b = state.boards.find(x => x.id === op.id); if (!b) return { rejected: true }; if (op.name) b.name = op.name; return {}; }
     case 'board-duplicate': {
       const src = state.boards.find(x => x.id === op.id); if (!src) return { rejected: true };
       const table = JSON.parse(JSON.stringify(src.table));
+      table.templates ??= [];   // older boards may lack the array before this copy
+      table.initiative ??= defaultInitiative();
+      table.fog ??= defaultFog();   // fog is deep-cloned by the stringify above; backfill if absent
       for (const f of table.figurines) f.instId = uid();
       for (const c of table.cards) c.instId = uid();
       for (const d of table.drawings) d.id = uid();
-      state.boards.push({ id: op.newId || uid(), name: src.name + ' copy', table });
+      for (const t of table.templates) t.instId = uid();
+      // Cloned figurines got fresh instIds, so any instId links on the copied
+      // initiative rows now dangle — give rows fresh ids and drop the stale links.
+      for (const e of table.initiative.entries) { e.id = uid(); e.instId = null; }
+      const grid = { ...defaultGrid(), ...(src.grid || {}) };   // carry the source board's grid onto the copy
+      state.boards.push({ id: op.newId || uid(), name: src.name + ' copy', table, grid });
       return {};
     }
     case 'board-delete': {
@@ -449,10 +657,16 @@ export function viewFor(state, clientId) {
   const decks = Object.fromEntries(Object.entries(state.decks).map(([k,v]) => [k, v.length]));
   const hands = {};
   for (const [pid, p] of Object.entries(state.hands)) { if (pid === 'gm') continue; hands[pid] = p; }
+  // GM-hidden figurines never reach players: omit them before the deep-clone so their
+  // existence/identity stays server-side (cards/drawings are untouched).
+  const liveBoard = boardById(state, state.activeBoardId);
+  const liveTable = liveBoard.table;
+  const table = { ...liveTable, figurines: liveTable.figurines.filter(f => !f.hidden) };
   return JSON.parse(JSON.stringify({
     roomCode: state.roomCode, playerCount: state.playerCount,
     decks, discards: state.discards,
-    table: boardById(state, state.activeBoardId).table,
+    table,
+    grid: liveBoard.grid || defaultGrid(),   // project the active board's grid so players render it (player view has no boards[])
     hands, assetMeta: state.assetMeta,
     log: state.log, chat: state.chat || [],
   }));
