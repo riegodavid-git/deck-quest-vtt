@@ -9,7 +9,7 @@
  * game is reloaded from storage after hibernation.
  */
 import { DurableObject } from "cloudflare:workers";
-import { applyOp, viewFor, migrateState, ensureCharacterToken } from "../../engine.mjs";
+import { applyOp, viewFor, migrateState, ensureCharacterToken, ensureSlot } from "../../engine.mjs";
 
 export class Room extends DurableObject {
   constructor(ctx, env) {
@@ -17,6 +17,7 @@ export class Room extends DurableObject {
     this.game = null;        // authoritative state (null until init-state)
     this.loaded = false;     // whether we've read storage this instance
     this.assetKinds = {};    // hash -> kind, learned from asset-begin
+    this._persistTimer = null; // trailing-debounce handle for move/patch persists
   }
 
   // ── storage / lifecycle ────────────────────────────────────────────────────
@@ -26,6 +27,14 @@ export class Room extends DurableObject {
     this.loaded = true;
   }
   async persist() { if (this.game) await this.ctx.storage.put("game", this.game); }
+  // Coalesce a burst of move-patch/patch ops into one trailing storage write.
+  schedulePersist() {
+    if (this._persistTimer) return;
+    this._persistTimer = setTimeout(async () => {
+      this._persistTimer = null;
+      try { await this.persist(); } catch {}
+    }, 400);
+  }
 
   // ── socket helpers ──────────────────────────────────────────────────────────
   att(ws) { try { return ws.deserializeAttachment() || {}; } catch { return {}; } }
@@ -48,12 +57,11 @@ export class Room extends DurableObject {
   }
 
   // Mark a player present in the game (used on register + init reconcile).
+  // Reuses a known slot (rejoin/resume) or allocates the next free 'player{N}',
+  // creating the hand + character token unconditionally. Returns the resolved id.
   markPresent(a) {
-    if (a.role !== "player" || !this.game) return;
-    const h = this.game.hands[a.slot]; if (!h) return;
-    h.connected = true;
-    if (a.name) h.name = a.name;
-    if (a.pfpHash) { h.pfpHash = a.pfpHash; ensureCharacterToken(this.game, a.slot); }
+    if (a.role !== "player" || !this.game) return null;
+    return ensureSlot(this.game, a.slot, a.name, a.pfpHash);
   }
 
   async webSocketMessage(ws, raw) {
@@ -63,12 +71,14 @@ export class Room extends DurableObject {
     if (d.type === "ping") { this.send(ws, { type: "pong", ts: d.ts }); return; }
 
     if (d.type === "register") {
-      const a = { role: d.role, slot: d.slot || "gm", name: d.name, pfpHash: d.pfpHash };
+      const a = { role: d.role, slot: d.role === "gm" ? "gm" : (d.slot || null), name: d.name, pfpHash: d.pfpHash };
       ws.serializeAttachment(a);
       if (a.role === "gm") {
         if (this.game) this.sendStateTo(ws); else this.send(ws, { type: "need-init" });
       } else if (this.game) {
-        this.markPresent(a); await this.persist(); this.broadcastState();
+        const id = this.markPresent(a);               // reuse known slot or allocate next free
+        if (id) ws.serializeAttachment({ ...a, slot: id }); // so clientId() resolves to the real id
+        await this.persist(); this.broadcastState();
       } else {
         this.send(ws, { type: "waiting" });           // GM hasn't created the room yet
       }
@@ -79,7 +89,10 @@ export class Room extends DurableObject {
       if (this.att(ws).role !== "gm") return;
       if (!this.game) {
         this.game = migrateState(d.state);
-        for (const s of this.sockets()) this.markPresent(this.att(s)); // reconcile early joiners
+        for (const s of this.sockets()) {              // reconcile early joiners + persist their allocated slots
+          const aa = this.att(s);
+          if (aa.role === "player") { const id = this.markPresent(aa); if (id) s.serializeAttachment({ ...aa, slot: id }); }
+        }
         await this.persist(); this.broadcastState();
       } else {
         this.sendStateTo(ws);                          // room already exists → GM adopts it
@@ -91,16 +104,19 @@ export class Room extends DurableObject {
 
     if (d.type === "op") {
       const by = this.clientId(this.att(ws));
-      const res = applyOp(this.game, d.op, by, { connected: this.connectedPlayerIds() });
-      if (res.rejected) return;
-      if (res.movePatch) { this.fanout({ type: "move-patch", ...res.movePatch }, ws); await this.persist(); }
+      let res;
+      try { res = applyOp(this.game, d.op, by, { connected: this.connectedPlayerIds() }); }
+      catch (err) { return; }                          // one bad op can't throw out of the handler
+      if (!res || res.rejected) return;
+      if (res.movePatch) { this.fanout({ type: "move-patch", ...res.movePatch }, ws); this.schedulePersist(); }
+      else if (res.patch) { for (const s of this.sockets()) this.send(s, { type: "patch", patch: res.patch }); this.schedulePersist(); } // broadcast to ALL incl. actor; idempotent
       else if (res.gmOnly) { const gm = this.gmSocket(); if (gm) this.sendStateTo(gm); await this.persist(); }
       else { await this.persist(); this.broadcastState(); }
       return;
     }
 
     if (d.type === "drag") {                           // ephemeral live-drag preview (not persisted)
-      this.fanout({ type: "move-patch", kind: d.kind, instId: d.instId, x: d.x, y: d.y, z: d.z }, ws);
+      this.fanout({ type: "move-patch", kind: d.kind, instId: d.instId, x: d.x, y: d.y, z: d.z, boardId: d.boardId }, ws);
       return;
     }
 
@@ -129,10 +145,14 @@ export class Room extends DurableObject {
 
   async webSocketClose(ws) {
     await this.ensureLoaded();
+    // Flush any pending move/patch debounce so a clean disconnect saves latest positions.
+    if (this._persistTimer) { clearTimeout(this._persistTimer); this._persistTimer = null; }
     const a = this.att(ws);
     if (a.role === "player" && this.game && this.game.hands[a.slot]) {
       this.game.hands[a.slot].connected = false;
       await this.persist(); this.broadcastState();
+    } else if (this.game) {
+      await this.persist();                            // commit any in-flight debounced writes
     }
   }
   async webSocketError(ws) { try { await this.webSocketClose(ws); } catch {} }

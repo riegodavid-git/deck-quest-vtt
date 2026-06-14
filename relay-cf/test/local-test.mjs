@@ -35,7 +35,7 @@ async function main() {
   const gm = await open(URL);
   sj(gm, { type: 'register', role: 'gm' });
   await waitFor(gm, 'need-init');
-  const state = newState(2, CATALOG);
+  const state = newState(CATALOG);   // dynamic slots: players are allocated on join, not seeded here
   const boardId = state.boards[0].id;
   sj(gm, { type: 'init-state', state });
   const gm0 = await waitFor(gm, 'state');
