@@ -58,6 +58,7 @@ button .icon + span, button span + .icon { margin-left:6px; }
 #topbar .grow { flex:1; }
 #topbar > div { font-size:11px; color:var(--muted); text-transform:uppercase; letter-spacing:.05em; }
 .room-code { background:transparent; padding:3px 10px; border:1px solid var(--accent); border-radius:999px; font:500 12px/1 var(--font-mono); color:var(--accent); cursor:pointer; user-select:all; text-transform:none; letter-spacing:0; }
+.invite-btn { margin-left:6px; padding:3px 9px; font:500 10px/1 var(--font-mono); letter-spacing:.04em; text-transform:none; }
 .conn-chip { display:inline-flex; align-items:center; gap:6px; background:var(--panel); padding:3px 9px; border:1px solid var(--line); border-radius:999px; margin-right:4px; font:400 11px/1 var(--font-body); color:var(--text); text-transform:none; }
 .dot { width:7px; height:7px; border-radius:50%; }
 
@@ -163,8 +164,19 @@ kbd { display:inline-block; min-width:16px; text-align:center; padding:2px 6px; 
 /* Table */
 #tableContent { position:absolute; top:0; left:0; width:4000px; height:3000px; transform-origin:0 0; }
 #figurineLayer, #cardLayer, #cursorLayer { position:absolute; top:0; left:0; width:100%; height:100%; }
+#gridLayer { position:absolute; top:0; left:0; width:100%; height:100%; pointer-events:none; }
 #drawLayer { position:absolute; top:0; left:0; width:100%; height:100%; pointer-events:none; }
 #drawLayerLive { position:absolute; top:0; left:0; width:100%; height:100%; pointer-events:none; }
+/* Fog of war — over tokens/cards/drawings, under cursors. Never blocks token grabs.
+   Opacity is set per-role in JS: GM 0.5 (see-through), player 1.0 (opaque). */
+#fogLayer { position:absolute; top:0; left:0; width:100%; height:100%; pointer-events:none; }
+/* AoE / spell-area templates — translucent area shapes under tokens, over the grid. */
+#templateLayer { position:absolute; top:0; left:0; width:100%; height:100%; pointer-events:none; overflow:visible; }
+#templateLayer .tpl-shape { pointer-events:auto; cursor:move; fill-opacity:0.25; stroke-width:2; stroke-opacity:0.95; }
+#templateLayer .tpl-shape.locked { cursor:default; }
+#templateLayer .tpl-handle { pointer-events:auto; cursor:pointer; fill:#fff; stroke:#111; stroke-width:1.5; }
+#templateLayer .tpl-handle.tpl-rotate { cursor:grab; }
+#templateLayer .tpl-handle.tpl-size { cursor:nwse-resize; }
 #cursorLayer { pointer-events:none; z-index:1000; }
 
 .figurine { position:absolute; border:1px dashed transparent; }
@@ -182,11 +194,15 @@ kbd { display:inline-block; min-width:16px; text-align:center; padding:2px 6px; 
 .figurine.locked { pointer-events: none; }
 body.edit-locked .figurine.locked { pointer-events: auto; }
 .figurine-lock-icon { position:absolute; top:2px; right:2px; font-size:11px; background:rgba(0,0,0,.7); padding:1px 5px; border-radius:3px; pointer-events:none; color:var(--accent); }
+.figurine-aura { position:absolute; pointer-events:none; }
 .figurine.character { border:3px solid var(--token-ally); border-radius:50%; overflow:visible; background:transparent; box-shadow: 0 4px 14px rgba(0,0,0,.7); }
 .figurine.character .figurine-img { border-radius:50%; background:#0a0c0e; }
 .figurine.character .figurine-loading { border-radius:50%; background:#1c1f22; color:var(--parchment); font:700 14px/1 var(--font-display); padding:4px; text-align:center; overflow:hidden; text-overflow:ellipsis; line-height:1.1; }
 .figurine.character.sneaking { border-style:dashed; }
 .figurine.character.downed { filter: grayscale(1) brightness(.55); }
+/* GM-only staged ("hidden from players") token: dashed outline + eye-off badge. Players never render this. */
+.figurine.hidden-gm { outline:2px dashed #c8a45a; outline-offset:3px; }
+.figurine.hidden-gm::after { content:'🚫👁'; position:absolute; top:-9px; left:-9px; font-size:11px; line-height:1; background:rgba(0,0,0,.8); border:1px solid var(--line-strong); border-radius:10px; padding:2px 5px; pointer-events:none; z-index:6; }
 .character-nametag { position:absolute; bottom:100%; left:50%; transform:translateX(-50%); margin-bottom:7px; padding:2px 9px; border-radius:10px; font:600 11px/1.4 var(--font-display); color:#1a1612; white-space:nowrap; pointer-events:none; box-shadow:0 2px 6px rgba(0,0,0,.6); letter-spacing:.04em; }
 .effect-bar { position:absolute; top:-10px; right:-10px; display:flex; gap:2px; pointer-events:none; }
 .effect-badge { background:rgba(0,0,0,.8); border-radius:10px; padding:2px 4px; font-size:12px; line-height:1; border:1px solid var(--line-strong); }
@@ -199,6 +215,21 @@ body.edit-locked .figurine.locked { pointer-events: auto; }
 .cursor { position:absolute; pointer-events:none; transform: translate(-2px,-2px); }
 .cursor-arrow { width:18px; height:18px; border-radius:50%; border:2px solid var(--accent); background-size:cover; background-position:center; }
 .cursor-label { font:500 10px/1 var(--font-mono); background:rgba(0,0,0,.8); padding:2px 6px; border-radius:3px; margin-top:3px; white-space:nowrap; color:var(--parchment); }
+
+/* Pings (laser-pointer markers) — transient, never persisted */
+.ping { position:absolute; pointer-events:none; transform:translate(-50%,-50%); display:flex; flex-direction:column; align-items:center; animation:ping-fade 1.5s ease-out forwards; }
+.ping-dot { width:26px; height:26px; border-radius:50%; border:3px solid currentColor; box-shadow:0 0 14px 2px currentColor; background-size:cover; background-position:center; animation:ping-pulse 1.5s ease-out forwards; }
+.ping-label { font:600 10px/1 var(--font-mono); background:rgba(0,0,0,.8); padding:2px 6px; border-radius:3px; margin-top:4px; white-space:nowrap; }
+@keyframes ping-fade { 0% { opacity:0; } 12% { opacity:1; } 70% { opacity:1; } 100% { opacity:0; } }
+@keyframes ping-pulse { 0% { transform:scale(.3); } 30% { transform:scale(1.25); } 100% { transform:scale(1); } }
+/* Off-screen guide arrows — non-transformed overlay on #tableStage, outside #tableContent */
+#pingArrowLayer { position:absolute; inset:0; pointer-events:none; z-index:1500; overflow:hidden; }
+.ping-arrow { position:absolute; width:0; height:0; border-style:solid; border-width:9px 0 9px 16px; border-color:transparent transparent transparent currentColor; filter:drop-shadow(0 0 4px currentColor); animation:ping-fade 1.5s ease-out forwards; }
+
+/* Ruler / measure tool — transient A→B line + midpoint distance label, never persisted */
+.ruler { position:absolute; pointer-events:none; }
+.ruler-line { position:absolute; height:0; border-top:2px dashed currentColor; transform-origin:left center; box-shadow:0 0 6px currentColor; }
+.ruler-label { position:absolute; transform:translate(-50%,-50%); font:600 11px/1 var(--font-mono); background:rgba(0,0,0,.82); padding:3px 7px; border-radius:4px; white-space:nowrap; box-shadow:0 0 0 1px currentColor; }
 
 /* Toolbar */
 #toolbar { position:absolute; top:10px; left:50%; transform:translateX(-50%); display:flex; gap:4px; background:var(--glass-bg); backdrop-filter:var(--glass-blur); -webkit-backdrop-filter:var(--glass-blur); border:1px solid var(--line-strong); padding:6px 8px; border-radius:var(--radius-lg); z-index:2000000; box-shadow:0 6px 20px rgba(0,0,0,.6); }
@@ -368,6 +399,12 @@ body.edit-locked .figurine.locked { pointer-events: auto; }
 #chatInput input { flex:1; padding:5px 8px; font:400 12px/1.4 var(--font-body); background:rgba(0,0,0,.4); border:1px solid var(--line); border-radius:var(--radius); }
 #chatInput input:focus { border-color:var(--accent); outline:none; }
 #chatInput button { padding:5px 10px; font-size:11px; }
+#chatTarget { padding:5px 6px; font:400 11px/1.4 var(--font-body); background:rgba(0,0,0,.4); border:1px solid var(--line); border-radius:var(--radius); color:var(--text); max-width:90px; }
+#chatTarget:focus { border-color:var(--accent); outline:none; }
+/* Private whisper styling — visibly distinct from public chat. */
+.chat-whisper { background:rgba(168,85,247,.10); border-left:2px solid var(--whisper, #a855f7); padding:1px 6px; border-radius:var(--radius); }
+.chat-whisper-tag { color:var(--whisper, #a855f7) !important; font-style:italic; }
+.chat-whisper .chat-msg-text { font-style:italic; }
 
 /* Remove number input spinners */
 input[type=number]::-webkit-inner-spin-button,
@@ -381,6 +418,32 @@ input[type=number] { -moz-appearance:textfield; }
 #gmNotesPanel[open] summary::after { content:'▴'; }
 #gmNotesPanel textarea { width:100%; min-height:100px; resize:vertical; padding:8px 12px; background:transparent; border:none; border-top:1px solid var(--line); color:var(--text); font:400 12px/1.5 var(--font-body); }
 #gmNotesPanel textarea:focus { outline:none; }
+
+/* ── Initiative tracker ── */
+#initiativePanel { background:var(--panel); border:1px solid var(--line); border-radius:var(--radius-lg); overflow:hidden; }
+#initiativePanel summary { padding:8px 12px; font:600 10px/1 var(--font-display); color:var(--parchment); text-transform:uppercase; letter-spacing:.16em; cursor:pointer; border-left:3px solid var(--accent); background:rgba(0,0,0,.25); list-style:none; display:flex; align-items:center; gap:8px; }
+#initiativePanel summary::-webkit-details-marker { display:none; }
+#initiativePanel summary::after { content:'▾'; color:var(--muted); margin-left:4px; }
+#initiativePanel[open] summary::after { content:'▴'; }
+#initiativePanel .init-round { margin-left:auto; font:500 10px/1 var(--font-mono); color:var(--accent); letter-spacing:.04em; text-transform:none; }
+.init-body { padding:8px 10px; display:flex; flex-direction:column; gap:8px; border-top:1px solid var(--line); }
+.init-controls { display:flex; flex-wrap:wrap; gap:4px; }
+.init-controls .mini { flex:1; min-width:48px; padding:4px 6px; font:600 10px/1 var(--font-mono); }
+.init-list { display:flex; flex-direction:column; gap:3px; }
+.init-empty { font:400 11px/1.4 var(--font-body); color:var(--muted); padding:4px 2px; }
+.init-row { display:flex; align-items:center; gap:6px; padding:3px 6px; border-radius:var(--radius); border:1px solid transparent; background:rgba(255,255,255,.02); }
+.init-row.active { border-color:var(--accent); background:rgba(242,202,80,.14); box-shadow:0 0 0 1px var(--accent) inset; }
+.init-row.dead { opacity:.55; }
+.init-row.dead .init-name { text-decoration:line-through; }
+.init-val { width:42px; flex-shrink:0; padding:2px 4px; font:600 12px/1 var(--font-mono); text-align:center; }
+.init-val-static { width:42px; flex-shrink:0; text-align:center; font:700 13px/1 var(--font-mono); color:var(--accent); }
+.init-name { flex:1; font:500 12px/1.2 var(--font-body); color:var(--text); overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+.init-name.linked { color:var(--parchment); }
+.init-actions { display:flex; gap:2px; flex-shrink:0; }
+.init-actions .mini { padding:2px 5px; font-size:11px; line-height:1; }
+.init-add-btn { width:100%; padding:5px; font:600 11px/1 var(--font-mono); }
+/* Active-turn ring on the on-turn token */
+.figurine.init-turn { box-shadow:0 0 0 3px var(--accent), 0 0 14px 2px rgba(242,202,80,.6); }
 
 /* ── Token detail popup ── */
 .token-detail-popup { position:fixed; background:var(--glass-bg); backdrop-filter:var(--glass-blur); -webkit-backdrop-filter:var(--glass-blur); border:1px solid var(--line-strong); border-radius:var(--radius-lg); padding:14px 16px; z-index:2147483645; min-width:200px; box-shadow:0 8px 28px rgba(0,0,0,.7); display:flex; flex-direction:column; gap:10px; }
@@ -398,12 +461,23 @@ input[type=number] { -moz-appearance:textfield; }
 .fig-bar-hp   { height:100%; border-radius:3px; background:#e05555; transition:width .3s; }
 .fig-bar-armor{ height:100%; border-radius:3px; background:#5588cc; transition:width .3s; }
 .fig-skull { position:absolute; inset:0; display:flex; align-items:center; justify-content:center; font-size:calc(var(--fig-size, 60px) * 0.5); background:rgba(0,0,0,.6); border-radius:inherit; pointer-events:none; z-index:2; }
+
+/* Drop-image hint overlay */
+#dropImageHint { position:absolute; inset:0; display:flex; align-items:center; justify-content:center; pointer-events:none; z-index:2147483640; opacity:0; transition:opacity .15s; font:700 22px/1 var(--font-display); color:var(--accent); letter-spacing:.06em; background:rgba(8,10,12,.55); border:3px dashed var(--accent); border-radius:var(--radius-lg); }
+#dropImageHint.active { opacity:1; }
+
+/* Image-import type picker popover */
+.img-import-picker { position:fixed; z-index:2147483647; background:var(--glass-bg); backdrop-filter:var(--glass-blur); -webkit-backdrop-filter:var(--glass-blur); border:1px solid var(--line-strong); border-radius:var(--radius-lg); padding:10px 12px; box-shadow:0 8px 28px rgba(0,0,0,.75); display:flex; flex-direction:column; gap:8px; min-width:150px; }
+.img-import-label { font:600 9px/1 var(--font-mono); color:var(--parchment); text-transform:uppercase; letter-spacing:.14em; }
+.img-import-btns { display:flex; gap:6px; }
+.img-import-btns .tool-btn { flex:1; justify-content:center; }
 </style>
 </head>
 <body>
 <div id="topbar">
   <h1>Deck Quest <span class="em">·</span> GM</h1>
-  <div>Room <span id="roomCode" class="room-code">—</span></div>
+  <div>Room <span id="roomCode" class="room-code">—</span>
+    <button class="invite-btn" onclick="window._copyInvite()" title="Copy a shareable invite link">Copy invite</button></div>
   <div>Players <span id="playerCountLabel">0</span></div>
   <div id="connList"></div>
   <div class="grow"></div>
@@ -428,10 +502,13 @@ input[type=number] { -moz-appearance:textfield; }
     <div id="deckTab" class="panel-tab" data-icon="chevron-right" title="Show decks"></div>
     <div id="toolbarTab" class="panel-tab" data-icon="chevron-down" title="Show toolbar"></div>
     <div id="tableContent">
+      <canvas id="gridLayer"></canvas>
+      <svg id="templateLayer" xmlns="http://www.w3.org/2000/svg"></svg>
       <div id="figurineLayer"></div>
       <div id="cardLayer"></div>
       <canvas id="drawLayer"></canvas>
       <canvas id="drawLayerLive"></canvas>
+      <canvas id="fogLayer"></canvas>
       <div id="cursorLayer"></div>
     </div>
     <div id="logChatPanel">
@@ -448,6 +525,7 @@ input[type=number] { -moz-appearance:textfield; }
         <div id="chatPane">
           <div id="chatMessages"></div>
           <div id="chatInput">
+            <select id="chatTarget" title="Send to"><option value="all">All</option></select>
             <input type="text" id="chatInputField" placeholder="Message…" autocomplete="off">
             <button id="chatSendBtn">Send</button>
           </div>
