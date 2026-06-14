@@ -35,7 +35,8 @@ export const TABLE_OPS = new Set(['draw','spawn-card','discard-send','flip-card'
 
 // Ops only the GM may issue.
 export const GM_ONLY_OPS = new Set(['draw','spawn-card','discard-send','shuffle-deck','lock-table-card',
-  'clear-drawings','set-gm-notes','board-add','board-rename','board-duplicate','board-delete','board-activate']);
+  'clear-drawings','set-gm-notes','board-add','board-rename','board-duplicate','board-delete','board-activate',
+  'remove-slot']);
 // Ops that edit a specific owner's sheet — a player may only target their own.
 export const OWNER_SCOPED_OPS = new Set(['set-player-field','add-inventory','remove-inventory','set-pfp']);
 
@@ -59,22 +60,13 @@ function pushLog(state, who, text, kind = 'info', color) {
 // ── State construction ───────────────────────────────────────────────────────
 // `cardsByType` is { role:[id,...], skill:[id,...], ... } supplied by the caller
 // (the browser, which owns the catalog). The engine never reads a card catalog.
-export function newState(playerCount, cardsByType) {
+export function newState(cardsByType) {
   const decks = {}; const discards = {};
   for (const t of DECK_TYPES) { decks[t] = shuffle([...(cardsByType?.[t] || [])]); discards[t] = []; }
-  const hands = { gm: { name: 'GM', color: '#3b82f6', hand: [] } };
-  for (let i=1; i<=playerCount; i++) {
-    hands['player'+i] = {
-      name: '', pfpHash: null,
-      stats: { ...DEFAULT_STATS }, hp: { ...DEFAULT_HP }, armor: { ...DEFAULT_ARMOR },
-      info: { class: '', race: '', age: '', weight: '' },
-      gold: 0, inventory: [], notes: '', hand: [], connected: false,
-      color: PLAYER_COLORS[i-1],
-    };
-  }
+  const hands = { gm: { name: 'GM', color: '#3b82f6', hand: [] } };  // GM only; player slots are allocated dynamically via ensureSlot
   const mainBoard = { id: uid(), name: 'Main', table: { cards: [], figurines: [], drawings: [] } };
   return {
-    roomCode: randomRoom(), playerCount,
+    roomCode: randomRoom(), playerCount: 0,
     decks, discards,
     boards: [mainBoard], activeBoardId: mainBoard.id,
     hands, assetMeta: {}, log: [], chat: [], gmNotes: '',
@@ -95,6 +87,9 @@ export function migrateState(state, typeOf) {
     state.boards = [{ id: uid(), name: 'Main', table }];
   }
   if (!state.activeBoardId) state.activeBoardId = state.boards[0].id;
+  // Derive playerCount for OLD fixed-slot saves (which already carry player1..N hands).
+  if (state.playerCount === undefined || state.playerCount === null)
+    state.playerCount = Object.keys(state.hands).filter(k => k !== 'gm').length;
   delete state.table;            // the live-pointer convenience is browser-only now
   if (state._z == null) normalizeZ(state);
   if (typeOf) {                  // backfill instance.type on any pre-v1 card instances
@@ -154,6 +149,34 @@ export function ensureCharacterToken(state, playerId) {
     label: state.hands[playerId]?.name || playerId, effects: {},
   });
 }
+// Dynamic player-slot allocation. Called by the host (DO) on a 'register' for a
+// player. Reuses an existing slot on rejoin/resume, else allocates the next free
+// 'player{N}' id with a fresh hand. In both cases marks connected, applies the
+// supplied name/pfp, and creates the player's character token unconditionally.
+// Returns the resolved slot id. Does NOT perform auth (caller gates role==='player').
+export function ensureSlot(state, slot, name, pfpHash) {
+  let id;
+  if (slot && typeof slot === 'string' && slot !== 'gm' && state.hands[slot]) {
+    id = slot;                                   // rejoin/resume: reuse existing slot
+  } else {
+    let n = 1; while (state.hands['player' + n]) n++;
+    id = 'player' + n;
+    state.hands[id] = {
+      name: name || '', pfpHash: pfpHash || null,
+      stats: { ...DEFAULT_STATS }, hp: { ...DEFAULT_HP }, armor: { ...DEFAULT_ARMOR },
+      info: { class: '', race: '', age: '', weight: '' },
+      gold: 0, inventory: [], notes: '', hand: [], connected: false,
+      color: PLAYER_COLORS[(n - 1) % PLAYER_COLORS.length],
+    };
+  }
+  state.hands[id].connected = true;
+  if (name) state.hands[id].name = name;
+  if (pfpHash) state.hands[id].pfpHash = pfpHash;
+  ensureCharacterToken(state, id);
+  state.playerCount = Object.keys(state.hands).filter(k => k !== 'gm').length;
+  return id;
+}
+
 // Ensure every currently-connected player has a character token on `boardId`.
 export function ensureCharactersOnBoard(state, boardId, connected) {
   const board = boardById(state, boardId); const tbl = board.table;
@@ -187,9 +210,11 @@ export function canApply(op, by) {
 
 // Which board a table-scoped op targets: the GM may edit any board it names
 // (op.boardId); a player op is always forced onto the live (active) board.
+function resolvedBoardId(state, op, by) {
+  return (by === 'gm' && op.boardId) ? op.boardId : state.activeBoardId;
+}
 function tableForOp(state, op, by) {
-  const id = (by === 'gm' && op.boardId) ? op.boardId : state.activeBoardId;
-  return boardById(state, id).table;
+  return boardById(state, resolvedBoardId(state, op, by)).table;
 }
 
 // ── The op applier ───────────────────────────────────────────────────────────
@@ -207,8 +232,9 @@ export function applyOp(state, op, by, ctx = {}) {
   switch (op.type) {
     case 'draw': {
       const deck = state.decks[op.deck]; if (!deck || !deck.length) return { rejected: true };
-      const cardId = deck.shift();
       const target = op.to || 'gm';
+      if (target !== 'table' && target !== 'gm' && !state.hands[target]) return { rejected: true };
+      const cardId = deck.shift();
       const inst = { instId: uid(), cardId, type: op.deck, faceUp: target === 'gm' || target === by };
       const dest = tableForOp(state, op, by);
       if (target === 'table') dest.cards.push({ ...inst, x: 400, y: 300, rot:0, z:nextZ(state) });
@@ -221,6 +247,7 @@ export function applyOp(state, op, by, ctx = {}) {
 
     case 'spawn-card': {   // GM: move a specific card out of its deck to a hand or the table
       const deck = state.decks[op.deck]; if (!deck) return { rejected: true };
+      if (op.to !== 'table' && op.to !== 'gm' && !state.hands[op.to]) return { rejected: true };
       const i = deck.indexOf(op.cardId); if (i >= 0) deck.splice(i, 1);
       const inst = { instId: uid(), cardId: op.cardId, type: op.deck, faceUp: op.to === 'gm' || op.to === 'table' };
       if (op.to === 'table') tbl.cards.push({ ...inst, x:400, y:300, rot:0, z:nextZ(state) });
@@ -228,7 +255,9 @@ export function applyOp(state, op, by, ctx = {}) {
       return {};
     }
     case 'discard-send': { // GM: move a card from a discard pile to table/deck/hand
-      const pile = state.discards[op.deck]; if (!pile) return { rejected: true };
+      if (!op.to) return { rejected: true };
+      const pile = state.discards[op.deck]; if (!Array.isArray(pile)) return { rejected: true };
+      if (!Number.isInteger(op.idx) || op.idx < 0 || op.idx >= pile.length) return { rejected: true };
       const cardId = pile.splice(op.idx, 1)[0]; if (cardId == null) return { rejected: true };
       if (op.to.where === 'table') tbl.cards.push({ instId: uid(), cardId, type: op.deck, faceUp: true, x:400, y:300, rot:0, z:nextZ(state) });
       else if (op.to.where === 'deck') state.decks[op.deck].push(cardId);
@@ -242,13 +271,17 @@ export function applyOp(state, op, by, ctx = {}) {
                                      : state.hands[op.owner]?.hand.find(c => c.instId === op.instId);
       if (!c) return { rejected: true };
       if (op.where === 'table' && c.locked) return { rejected: true };
-      c.faceUp = !c.faceUp; return {};
+      c.faceUp = !c.faceUp;
+      // Table flips fan out as a targeted patch; hand flips full-broadcast (visibility differs per view).
+      if (op.where === 'table')
+        return { patch: { kind:'flip-card', boardId: resolvedBoardId(state, op, by), where:'table', instId: op.instId, faceUp: c.faceUp } };
+      return {};
     }
     case 'move-table-card': {
       const c = tbl.cards.find(c => c.instId === op.instId); if (!c) return { rejected: true };
       if (c.locked) return { rejected: true };
       c.x = op.x; c.y = op.y; c.z = nextZ(state);
-      return { movePatch: { kind:'card', instId:op.instId, x:c.x, y:c.y, z:c.z } };
+      return { movePatch: { kind:'card', instId:op.instId, x:c.x, y:c.y, z:c.z, boardId: resolvedBoardId(state, op, by) } };
     }
     case 'lock-table-card': { const c = tbl.cards.find(c => c.instId === op.instId); if (!c) return { rejected: true }; c.locked = !c.locked; return {}; }
 
@@ -273,9 +306,18 @@ export function applyOp(state, op, by, ctx = {}) {
 
     case 'set-player-field': {
       const p = state.hands[op.owner]; if (!p) return { rejected: true };
+      if (typeof op.path !== 'string' || !op.path) return { rejected: true };
+      // Allow-list: exact top-level fields + the 'info.' and 'stats.' sub-trees.
+      const allowedExact = new Set(['name','gold','notes','hp','armor']);
+      if (!allowedExact.has(op.path) && !op.path.startsWith('info.') && !op.path.startsWith('stats.'))
+        return { rejected: true };
       const parts = op.path.split('.');
-      let o = p; for (let i=0;i<parts.length-1;i++) o = o[parts[i]];
-      o[parts[parts.length-1]] = op.value; return {};
+      let o = p;
+      for (let i = 0; i < parts.length - 1; i++) {
+        o = o[parts[i]];
+        if (o == null || typeof o !== 'object') return { rejected: true };  // intermediate must exist
+      }
+      o[parts[parts.length - 1]] = op.value; return {};
     }
     case 'set-pfp': { const p = state.hands[op.owner]; if (!p) return { rejected: true }; p.pfpHash = op.hash; ensureCharacterToken(state, op.owner); return {}; }
     case 'add-inventory': { const p = state.hands[op.owner]; if (!p) return { rejected: true }; (p.inventory = p.inventory || []).push({ id: uid(), name: op.name }); return {}; }
@@ -304,7 +346,7 @@ export function applyOp(state, op, by, ctx = {}) {
       const isDrag = op.x != null && op.y != null && op.w == null && op.h == null && op.rot == null &&
         op.locked == null && op.opacity == null && op.flipH == null && op.flipV == null &&
         op.label == null && op.showName == null && !op.bringToFront && !op.sendToBack;
-      if (isDrag) return { movePatch: { kind:'figurine', instId:op.instId, x:f.x, y:f.y, z:f.z } };
+      if (isDrag) return { movePatch: { kind:'figurine', instId:op.instId, x:f.x, y:f.y, z:f.z, boardId: resolvedBoardId(state, op, by) } };
       return {};
     }
     case 'remove-figurine': { tbl.figurines = tbl.figurines.filter(f => f.instId !== op.instId); return {}; }
@@ -313,20 +355,38 @@ export function applyOp(state, op, by, ctx = {}) {
     case 'clear-drawings': { tbl.drawings = []; pushLog(state, 'GM', 'cleared drawings', 'sys'); return {}; }
     case 'clear-my-drawings': { tbl.drawings = tbl.drawings.filter(d => d.by !== op.by); return {}; }
     case 'undo-drawing': { for (let i=tbl.drawings.length-1;i>=0;i--){ if (tbl.drawings[i].by === op.by){ tbl.drawings.splice(i,1); break; } } return {}; }
-    case 'add-drawing': { tbl.drawings.push({ id: uid(), by: op.by, ...op.stroke }); return {}; }
+    case 'add-drawing': {
+      const drawing = { id: uid(), by: op.by, ...op.stroke };
+      tbl.drawings.push(drawing);
+      return { patch: { kind:'add-drawing', boardId: resolvedBoardId(state, op, by), drawing } };
+    }
     case 'remove-drawing': { tbl.drawings = tbl.drawings.filter(d => d.id !== op.id); return {}; }
 
     case 'set-group': {
       const gid = op.groupId || null;
       for (const id of (op.instIds || [])) {
-        const f = tbl.figurines.find(x => x.instId === id); if (f) { if (gid) f.groupId = gid; else delete f.groupId; }
-        const c = tbl.cards.find(x => x.instId === id);     if (c) { if (gid) c.groupId = gid; else delete c.groupId; }
+        const f = tbl.figurines.find(x => x.instId === id); if (f && !f.locked) { if (gid) f.groupId = gid; else delete f.groupId; }
+        const c = tbl.cards.find(x => x.instId === id);     if (c && !c.locked) { if (gid) c.groupId = gid; else delete c.groupId; }
       }
       return {};
     }
-    case 'toggle-effect': { const f = tbl.figurines.find(f => f.instId === op.instId); if (!f || f.locked) return { rejected: true }; f.effects = f.effects || {}; f.effects[op.effect] = !f.effects[op.effect]; return {}; }
-    case 'set-figurine-label': { const f = tbl.figurines.find(f => f.instId === op.instId); if (!f || f.locked) return { rejected: true }; f.label = op.label; return {}; }
-    case 'set-figurine-vitals': { const f = tbl.figurines.find(x => x.instId === op.instId); if (!f || f.locked) return { rejected: true }; if (op.hp !== undefined) f.hp = op.hp; if (op.armor !== undefined) f.armor = op.armor; return {}; }
+    case 'toggle-effect': {
+      const f = tbl.figurines.find(f => f.instId === op.instId); if (!f || f.locked) return { rejected: true };
+      f.effects = f.effects || {}; f.effects[op.effect] = !f.effects[op.effect];
+      return { patch: { kind:'toggle-effect', boardId: resolvedBoardId(state, op, by), instId: op.instId, effect: op.effect, value: f.effects[op.effect] } };
+    }
+    case 'set-figurine-label': {
+      const f = tbl.figurines.find(f => f.instId === op.instId); if (!f || f.locked) return { rejected: true };
+      f.label = op.label;
+      return { patch: { kind:'set-figurine-label', boardId: resolvedBoardId(state, op, by), instId: op.instId, label: f.label } };
+    }
+    case 'set-figurine-vitals': {
+      const f = tbl.figurines.find(x => x.instId === op.instId); if (!f || f.locked) return { rejected: true };
+      const patch = { kind:'set-figurine-vitals', boardId: resolvedBoardId(state, op, by), instId: op.instId };
+      if (op.hp !== undefined) { f.hp = op.hp; patch.hp = op.hp; }
+      if (op.armor !== undefined) { f.armor = op.armor; patch.armor = op.armor; }
+      return { patch };
+    }
 
     case 'send-chat': {
       if (!state.chat) state.chat = [];
@@ -337,11 +397,20 @@ export function applyOp(state, op, by, ctx = {}) {
     case 'log': { pushLog(state, op.who, op.text, op.kind || 'info', op.color); return {}; }
     case 'set-gm-notes': { state.gmNotes = op.text || ''; return { gmOnly: true }; }
 
+    case 'remove-slot': {  // GM-only: delete a player's hand + their character token from every board
+      if (op.slot === 'gm' || !state.hands[op.slot]) return { rejected: true };
+      delete state.hands[op.slot];
+      for (const b of state.boards) b.table.figurines = b.table.figurines.filter(f => !(f.kind === 'character' && f.playerId === op.slot));
+      state.playerCount = Object.keys(state.hands).filter(k => k !== 'gm').length;
+      pushLog(state, 'GM', 'removed a player slot', 'sys');
+      return {};
+    }
+
     // ── Board management (GM-only; the GM supplies board ids) ──────────────────
     case 'board-add': { state.boards.push({ id: op.id || uid(), name: op.name || ('Board ' + (state.boards.length + 1)), table: { cards: [], figurines: [], drawings: [] } }); return {}; }
-    case 'board-rename': { const b = boardById(state, op.id); if (b && op.name) b.name = op.name; return {}; }
+    case 'board-rename': { const b = state.boards.find(x => x.id === op.id); if (!b) return { rejected: true }; if (op.name) b.name = op.name; return {}; }
     case 'board-duplicate': {
-      const src = boardById(state, op.id);
+      const src = state.boards.find(x => x.id === op.id); if (!src) return { rejected: true };
       const table = JSON.parse(JSON.stringify(src.table));
       for (const f of table.figurines) f.instId = uid();
       for (const c of table.cards) c.instId = uid();
@@ -354,9 +423,10 @@ export function applyOp(state, op, by, ctx = {}) {
       state.boards = state.boards.filter(b => b.id !== op.id); return {};
     }
     case 'board-activate': {
+      const b = state.boards.find(x => x.id === op.id); if (!b) return { rejected: true };
       state.activeBoardId = op.id;
       ensureCharactersOnBoard(state, op.id, ctx.connected);
-      pushLog(state, 'GM', 'activated board: ' + boardById(state, op.id).name, 'sys');
+      pushLog(state, 'GM', 'activated board: ' + b.name, 'sys');
       return {};
     }
   }
