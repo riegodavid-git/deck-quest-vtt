@@ -1,18 +1,20 @@
 # Deck Quest VTT — Project Brief
 
-> **Last updated:** 2026-06-01  
-> **Latest release:** v0.3.5  
+> **Last updated:** 2026-06-14  
+> **Latest release:** v1.3.1  
 > **GitHub repo:** https://github.com/riegodavid-git/deck-quest-vtt  
-> **Live relay server:** https://deck-quest-vtt.onrender.com  
+> **Live host:** Cloudflare Worker + Durable Object — `wss://deck-quest-vtt.david-riego-01.workers.dev` (`relay-cf/`)  
 > **Official game page:** https://www.garagesofagames.com/games/deck-quest
+
+> ⚠️ **Historical note:** parts of this brief are a pre-**v1.0** snapshot — they predate the migration from a Render WebSocket relay to **Cloudflare Workers + Durable Objects**. The relay/deployment details have been corrected to Cloudflare; the legacy Render relay (`relay/`) and the Render service have been removed. For the authoritative current architecture see **`README.md`**, and **`CHANGELOG.md`** for version history.
 
 ---
 
 ## 1. What This Project Is
 
-A self-contained virtual tabletop (VTT) for **Deck Quest**, an open-ended card-based TTRPG. Two standalone HTML files (`gm.html` and `player.html`) that players open locally — no install, no server, no setup beyond downloading the file. All 337 card PNGs and 1924 D&D tokens are base64-embedded directly in the HTML files.
+A self-contained virtual tabletop (VTT) for **Deck Quest**, an open-ended card-based TTRPG. Two standalone HTML files (`gm.html` and `player.html`) that players open locally — no install, no account, no setup beyond downloading the file. (Card/token art loads at runtime — deck art from Cloudflare KV, tokens/maps from the GM's local assets folder — rather than being base64-embedded, so the files stay small.)
 
-Real-time sync runs through a **WebSocket relay server** hosted on Render.com. Data routes through the server (not peer-to-peer), which means it works on all home networks regardless of NAT/firewall setup.
+Real-time sync runs through an **authoritative Cloudflare Worker + Durable Object** (`relay-cf/`): one Durable Object per room validates and applies every op server-side, then broadcasts a filtered view to each client. Data routes through the edge (not peer-to-peer), so it works on all home networks regardless of NAT/firewall.
 
 ---
 
@@ -26,9 +28,9 @@ deck-quest-vtt/
 │   ├── shared.js                     # Core engine (~2200 lines) — shared between GM and Player
 │   ├── gm.template.html              # GM client markup + CSS
 │   └── player.template.html          # Player client markup + CSS
-├── relay/
-│   ├── server.js                     # WebSocket relay server (~124 lines)
-│   └── package.json                  # { "dependencies": { "ws": "^8.16.0" } }
+├── relay-cf/                         # Cloudflare Worker + Durable Object host (the live relay)
+│   ├── src/index.js                  # Worker router + Room DO — applies ops, broadcasts viewFor, persists
+│   └── wrangler.toml                 # deploy config — `cd relay-cf && npx wrangler deploy`
 ├── Deck Quest Open Source PNGs/      # Card art (gitignored from dist, committed as source)
 │   ├── Roles/PNGs/                   # 75 cards
 │   ├── Skills/PNGs/                  # 25 cards
@@ -85,17 +87,18 @@ GitHub release assets are the two HTML files. Players download `player.html` fro
 
 ## 5. Architecture
 
-### Networking — WebSocket relay
+### Networking — authoritative Cloudflare Durable Object
 
 ```
-GM (gm.html)  ←→  wss://deck-quest-vtt.onrender.com  ←→  Players (player.html)
+GM (gm.html)  ←→  wss://deck-quest-vtt.david-riego-01.workers.dev  ←→  Players (player.html)
+                  (Cloudflare Worker → one Room Durable Object per room)
 ```
 
-- **GM is authoritative host.** All state lives on the GM; players send ops, GM applies + broadcasts filtered views.
-- **Relay server** (`relay/server.js`) is a pure message router — no game logic. Routes: `player → GM` (wrapped as `{ from: slot, msg }`) and `GM → player` (targeted `{ to: slot, msg }`) or `GM → all` (broadcast `{ msg }`).
-- **No asset transfer for built-in content.** Cards and tokens are embedded in both files, referenced only by ID.
+- **The Durable Object is the authoritative host.** Every op is validated (`canApply`) and applied server-side via the shared engine (`engine.mjs`), then a filtered view (`viewFor`) is broadcast per client. No player's connection — not even the GM's — is in the critical path.
+- **Worker/DO** (`relay-cf/src/index.js`) routes WebSocket messages and owns game state. Ephemeral signals (cursor, drag, ping→`ping-show`, ruler, whisper) are relayed without persisting; structural ops persist to DO storage.
+- **Deck card art** is served from **Cloudflare KV** (immutable-cached) and never travels over the GM's connection. **Tokens/maps** load from the GM's local assets folder.
 - **Uploaded assets** (player profile pics, GM-imported maps/figurines) are transferred as chunked base64 over WebSocket and cached in IndexedDB.
-- **Render free tier** spins down after ~15 min inactivity → first connection has ~30s cold start delay. Self-ping every 5 min (`RENDER_EXTERNAL_URL`) mitigates this.
+- **Persistence:** the DO persists each room's state to storage and survives hibernation, so a named room's table is restored on reconnect.
 
 ### State model
 
@@ -176,9 +179,9 @@ All drag and drawing coordinates are converted to table space: `tableX = (screen
 | Setup wizards | `gmSetupFlow()`, `playerJoinFlow()` |
 | Boot | `boot()` — called on DOMContentLoaded |
 
-### `relay/server.js`
+### `relay-cf/src/index.js`
 
-Simple WebSocket relay. Rooms keyed by `roomCode`. Routes messages between GM and players. Sends `_ws-connected` / `_ws-disconnected` lifecycle events to GM. Heartbeat pings every 30s to drop dead connections.
+The Cloudflare Worker + Room Durable Object. Routes by `env.ROOMS.idFromName(room)` (one DO per room). Handles `register` / `init-state` / `reset-room`, applies ops via `engine.mjs`, broadcasts `viewFor` per client, relays ephemeral signals (cursor, drag, ping→`ping-show`, ruler, whisper), and persists state to DO storage. The `ping`/`pong` heartbeat is reserved at the top of `webSocketMessage` — new ephemeral message types must not reuse `ping` (that collision broke the laser pointer in v1.3.0, fixed in v1.3.1).
 
 ---
 
@@ -244,12 +247,12 @@ Simple WebSocket relay. Rooms keyed by `roomCode`. Routes messages between GM an
 
 | Issue | Severity | Notes |
 |---|---|---|
-| Render free tier cold start (~30s delay) | Low | Self-ping every 5 min mitigates; upgrade to $7/mo Starter for always-on |
+| ~~Render free-tier cold start~~ (resolved at v1.0) | — | No longer applies — the live host is a Cloudflare Worker + Durable Object (no spin-down) |
 | Drawing coords off when zoomed + canvas resized | Low | Canvas size is 4000×3000 virtual; at extreme zoom levels strokes may appear offset |
 | Group drag doesn't move items visually during drag when they are on different layers (cards vs figurines) | Low | Positions update correctly on mouseup via ops |
 | No undo for table ops (card moves, figurine ops) | Medium | Would need op history stack |
 | Session save can fail if localStorage is full (~5MB limit) | Low | Error caught silently; manual Save to JSON always works |
-| Render free tier: 10 players with heavy cursor movement may hit CPU limits | Medium | Increase cursor throttle from 60ms → 100ms in `setupTableInteraction` if needed |
+| ~~Render free-tier CPU at 10 players~~ (resolved at v1.0) | — | No longer applies — Cloudflare Workers; cursor throttle is still tunable in `setupTableInteraction` |
 
 ---
 
@@ -258,7 +261,7 @@ Simple WebSocket relay. Rooms keyed by `roomCode`. Routes messages between GM an
 ### `templates/shared.js`
 
 ```js
-const RELAY_URL = 'wss://deck-quest-vtt.onrender.com';  // ← update if relay is redeployed
+const RELAY_URL = 'wss://deck-quest-vtt.david-riego-01.workers.dev';  // ← the Cloudflare Worker; update if redeployed elsewhere
 ```
 
 After changing `RELAY_URL`, run `node build.js` to rebuild.
@@ -279,17 +282,17 @@ if (now - cursorThrottle > 60) {   // ← increase to 100 for 10-player sessions
 
 ## 10. Deployment
 
-### Relay server (Render.com)
-- **Service:** `deck-quest-vtt` at https://deck-quest-vtt.onrender.com
-- **Source:** `relay/` subdirectory of this repo, `main` branch
-- **Build:** `npm install` | **Start:** `npm start`
-- **Tier:** Free (512MB RAM, 0.1 vCPU) — adequate for ≤10 players
-- **Auto-deploy:** pushes to `main` that touch `relay/` trigger redeploy automatically
-- **Keep-alive:** `RENDER_EXTERNAL_URL` env var triggers self-ping every 5 min (set automatically by Render)
+### Relay host (Cloudflare Workers + Durable Objects)
+- **Service:** `deck-quest-vtt` Worker at https://deck-quest-vtt.david-riego-01.workers.dev
+- **Source:** `relay-cf/` (`src/index.js` + `wrangler.toml`)
+- **Deploy:** `cd relay-cf && npx wrangler deploy` — **NOT automatic.** Redeploy whenever `engine.mjs` or `relay-cf/src/index.js` changes (the DO bundles the engine, so new ops won't work until redeployed).
+- **Bindings:** a `ROOMS` Durable Object namespace (one DO per room) + an `ART` KV namespace (deck card art).
+- **Tier:** Cloudflare free Workers plan, pinned to the APAC region.
+- **Note:** the old Render service was retired at v1.0 and has since been deleted.
 
 ### GitHub releases
 - Only `dist/gm.html` and `dist/player.html` are published as release assets
-- `dist/` is gitignored — files are too large (~145MB each) for normal commits
+- `dist/` is gitignored and published only as release assets (~0.5–0.8 MB each, since art is no longer embedded)
 - Use `gh release create vX.Y.Z dist/gm.html dist/player.html --latest` to publish
 
 ---
@@ -330,7 +333,7 @@ These were discussed or naturally follow from current state:
    - `templates/player.template.html` — Player client CSS and HTML structure
    - `fonts/` (ui-redesign branch only) — base64-embedded woff2 fonts injected via `%%FONTS_CSS%%`
 5. After any code change: `node build.js` → test `dist/gm.html` locally → commit → push → `gh release create`
-6. Relay server changes (`relay/server.js`) auto-deploy to Render on push — no manual step needed.
+6. Relay/engine changes (`relay-cf/src/index.js`, `engine.mjs`) need a manual `cd relay-cf && npx wrangler deploy` — they do **not** auto-deploy.
 
 ### Quick syntax check before building
 ```bash
